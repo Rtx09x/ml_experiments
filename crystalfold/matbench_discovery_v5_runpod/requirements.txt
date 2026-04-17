@@ -1,0 +1,10 @@
+ase>=3.22.1
+h5py>=3.10
+ijson>=3.2
+numpy>=1.26
+pandas>=2.1
+pymatgen>=2024.5.1
+requests>=2.31
+torch>=2.3
+tqdm>=4.66
+

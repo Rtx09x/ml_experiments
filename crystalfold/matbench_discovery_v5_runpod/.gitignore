@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+raw/
+processed/
+runs/
+*.h5
+*.pt
+*.part
+
