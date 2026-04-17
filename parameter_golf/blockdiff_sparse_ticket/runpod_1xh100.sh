@@ -43,7 +43,23 @@ cp "${EXPERIMENT_REPO_DIR}/parameter_golf/blockdiff_sparse_ticket/runpod_1xh100.
 
 cd "${PARAMETER_GOLF_DIR}"
 
-python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards "${TRAIN_SHARDS:-80}"
+TRAIN_SHARDS="${TRAIN_SHARDS:-80}"
+DATASET_DIR="${PARAMETER_GOLF_DIR}/data/datasets/fineweb10B_sp1024"
+TOKENIZER_FILE="${PARAMETER_GOLF_DIR}/data/tokenizers/fineweb_1024_bpe.model"
+EXISTING_TRAIN_SHARDS=0
+if [ -d "${DATASET_DIR}" ]; then
+  EXISTING_TRAIN_SHARDS="$(find "${DATASET_DIR}" -maxdepth 1 -name 'fineweb_train_*.bin' -type f 2>/dev/null | wc -l | tr -d ' ')"
+fi
+
+if [ "${EXISTING_TRAIN_SHARDS}" -ge "${TRAIN_SHARDS}" ] && [ -f "${TOKENIZER_FILE}" ]; then
+  echo "dataset already present: ${EXISTING_TRAIN_SHARDS} train shards, tokenizer present"
+else
+  if [ -d "${DATASET_DIR}" ]; then
+    echo "removing partial/stale dataset dir before download: ${DATASET_DIR}"
+    rm -rf "${DATASET_DIR}"
+  fi
+  python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards "${TRAIN_SHARDS}"
+fi
 
 export RUN_ID
 export DATA_PATH="${DATA_PATH:-./data/datasets/fineweb10B_sp1024}"
