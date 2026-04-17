@@ -45,23 +45,27 @@ def _ensure_packages():
     import subprocess
     import sys
 
-    packages = {
-        "matbench": "matbench",
-        "matminer": "matminer",
-        "pymatgen": "pymatgen",
-        "gensim": "gensim",
-        "sklearn": "scikit-learn",
-        "monty": "monty",
-    }
-    missing = [pip_name for mod, pip_name in packages.items()
-               if importlib.util.find_spec(mod) is None]
-    if missing and INSTALL_MISSING:
-        print("Installing missing packages:", missing)
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-q"] + missing
-        )
-    elif missing:
+    required_modules = ["matbench", "matminer", "pymatgen", "gensim", "sklearn", "monty"]
+    missing = [mod for mod in required_modules if importlib.util.find_spec(mod) is None]
+    if not missing:
+        return
+    if not INSTALL_MISSING:
         raise ImportError(f"Missing packages: {missing}")
+
+    print("Installing missing packages:", missing)
+    # matbench==0.6 pins Python-3.12-hostile historical versions
+    # (scikit-learn==1.0.1, scipy==1.7.3). Install modern runtime deps first,
+    # then install matbench without dependency backtracking.
+    modern_deps = []
+    if any(m in missing for m in ["matminer", "pymatgen", "monty", "gensim", "sklearn"]):
+        modern_deps = ["matminer", "pymatgen", "monty", "gensim", "scikit-learn"]
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q", "--upgrade"] + modern_deps
+        )
+    if "matbench" in missing:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q", "--no-deps", "matbench==0.6"]
+        )
 
 
 _ensure_packages()
