@@ -90,6 +90,25 @@ chmod +x ml_experiments/parameter_golf/blockdiff_sparse_ticket/runpod_1xh100.sh
 ./ml_experiments/parameter_golf/blockdiff_sparse_ticket/runpod_1xh100.sh
 ```
 
+The launcher writes:
+
+```text
+/workspace/blockdiff_sparse_ticket_runs/<RUN_ID>/
+  README.md
+  env.json
+  metrics.csv
+  metrics_summary.json
+  runpod_1xh100.sh
+  train.log
+  train_gpt.py
+  final_model.pt
+  final_model_pre_quant.pt
+  final_model.int6.ptz
+  tokenizers/fineweb_1024_bpe.model
+
+/workspace/blockdiff_sparse_ticket_runs/<RUN_ID>.zip
+```
+
 Manual equivalent:
 
 ```bash
