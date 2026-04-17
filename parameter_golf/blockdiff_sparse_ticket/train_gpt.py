@@ -1391,6 +1391,22 @@ def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tens
 def quantize_int6_gptq(weight, hessian=None, clip_range=31, block_size=128):
     """Full GPTQ: Hessian-aware int6 quantization with Cholesky error compensation.
     If hessian is None, falls back to percentile search."""
+    def _safe_cholesky(mat: Tensor, *, upper: bool = False) -> Tensor | None:
+        mat = 0.5 * (mat + mat.T)
+        diag = torch.diag(mat)
+        diag_scale = diag.abs().mean().item()
+        if not math.isfinite(diag_scale) or diag_scale <= 0:
+            diag_scale = 1.0
+        eye = torch.eye(mat.size(0), dtype=mat.dtype, device=mat.device)
+        for mult in [0.0, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0]:
+            try:
+                if mult == 0.0:
+                    return torch.linalg.cholesky(mat, upper=upper)
+                return torch.linalg.cholesky(mat + eye * (diag_scale * mult), upper=upper)
+            except torch._C._LinAlgError:
+                continue
+        return None
+
     t32 = weight.float()
     if t32.ndim != 2 or hessian is None:
         return _quantize_int6_percentile(t32, clip_range)
@@ -1405,9 +1421,16 @@ def quantize_int6_gptq(weight, hessian=None, clip_range=31, block_size=128):
     W = t32[:, perm].clone()
     W[:, dead[perm]] = 0
     H = H[perm][:, perm]
-    Hinv = torch.linalg.cholesky(H)
-    Hinv = torch.cholesky_inverse(Hinv)
-    Hinv = torch.linalg.cholesky(Hinv, upper=True)
+    Hchol = _safe_cholesky(H)
+    if Hchol is None:
+        print("gptq:warning Hessian not PD after damping; falling back to percentile quantization")
+        return _quantize_int6_percentile(t32, clip_range)
+    Hinv = torch.cholesky_inverse(Hchol)
+    Hinv = 0.5 * (Hinv + Hinv.T)
+    Hinv = _safe_cholesky(Hinv, upper=True)
+    if Hinv is None:
+        print("gptq:warning inverse Hessian not PD after damping; falling back to percentile quantization")
+        return _quantize_int6_percentile(t32, clip_range)
     best_q = None; best_scale = None; best_err = float('inf')
     for pct in [0.9990, 0.9995, 0.9999, 0.99999, 1.0]:
         if pct < 1.0:
