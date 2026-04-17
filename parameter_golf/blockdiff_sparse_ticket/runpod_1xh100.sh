@@ -15,8 +15,14 @@ TRAIN_RC=0
 
 cd "${WORKSPACE_ROOT}"
 
-if [ ! -d "${PARAMETER_GOLF_DIR}/.git" ]; then
+if [ -d "${PARAMETER_GOLF_DIR}" ] && [ -f "${PARAMETER_GOLF_DIR}/data/cached_challenge_fineweb.py" ]; then
+  echo "using existing Parameter Golf workspace: ${PARAMETER_GOLF_DIR}"
+elif [ ! -d "${PARAMETER_GOLF_DIR}" ]; then
   git clone https://github.com/openai/parameter-golf.git "${PARAMETER_GOLF_DIR}"
+else
+  echo "error: ${PARAMETER_GOLF_DIR} exists but does not look like Parameter Golf" >&2
+  echo "set PARAMETER_GOLF_DIR to a clean path or remove the bad directory" >&2
+  exit 2
 fi
 
 if [ ! -d "${EXPERIMENT_REPO_DIR}/.git" ]; then
