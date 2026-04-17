@@ -20,9 +20,10 @@ if [ -d "${PARAMETER_GOLF_DIR}" ] && [ -f "${PARAMETER_GOLF_DIR}/data/cached_cha
 elif [ ! -d "${PARAMETER_GOLF_DIR}" ]; then
   git clone https://github.com/openai/parameter-golf.git "${PARAMETER_GOLF_DIR}"
 else
-  echo "error: ${PARAMETER_GOLF_DIR} exists but does not look like Parameter Golf" >&2
-  echo "set PARAMETER_GOLF_DIR to a clean path or remove the bad directory" >&2
-  exit 2
+  BAD_DIR="${PARAMETER_GOLF_DIR}.not_parameter_golf.$(date +%s)"
+  echo "moving non-Parameter-Golf path aside: ${PARAMETER_GOLF_DIR} -> ${BAD_DIR}" >&2
+  mv "${PARAMETER_GOLF_DIR}" "${BAD_DIR}"
+  git clone https://github.com/openai/parameter-golf.git "${PARAMETER_GOLF_DIR}"
 fi
 
 if [ ! -d "${EXPERIMENT_REPO_DIR}/.git" ]; then
