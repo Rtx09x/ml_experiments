@@ -143,6 +143,8 @@ def set_seed(seed: int) -> None:
 
 def to_plain(obj):
     """Convert Matbench/monty/numpy objects into JSON-safe primitives."""
+    if obj.__class__.__name__ == "RecursiveDotDict":
+        return {str(k): to_plain(v) for k, v in dict(obj).items()}
     as_dict = getattr(obj, "as_dict", None)
     if callable(as_dict):
         return to_plain(as_dict())
@@ -159,6 +161,19 @@ def to_plain(obj):
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     return obj
+
+
+def task_metadata_summary(task):
+    return {
+        "dataset_name": getattr(task, "dataset_name", TASK_NAME),
+        "version": getattr(task, "version", None),
+        "input_type": getattr(task.metadata, "input_type", None),
+        "target": getattr(task.metadata, "target", None),
+        "task_type": getattr(task.metadata, "task_type", None),
+        "unit": getattr(task.metadata, "unit", None),
+        "n_samples": getattr(task.metadata, "n_samples", None),
+        "mad": getattr(task.metadata, "mad", None),
+    }
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -777,7 +792,7 @@ def load_task_and_features():
 
     log.info("Loaded %s", task)
     log.info("Matbench folds: %s", list(task.folds))
-    log.info("Task metadata: %s", to_plain(task.metadata))
+    log.info("Task metadata: %s", task_metadata_summary(task))
 
     full_df = task.df.copy()
     input_col = task.metadata.input_type
