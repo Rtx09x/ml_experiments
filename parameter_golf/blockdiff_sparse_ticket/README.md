@@ -79,7 +79,7 @@ torchrun --standalone --nproc_per_node=1 working/blockdiff_sparse_ticket/train_g
 
 Do not start with 90% sparsity. That is not research, that is a deletion spell.
 
-1x H100 SXM one-hour run:
+1x H100 SXM run with one-hour training cap:
 
 Shortest path on the official Parameter Golf RunPod template:
 
@@ -109,6 +109,9 @@ The launcher writes:
 /workspace/blockdiff_sparse_ticket_runs/<RUN_ID>.zip
 ```
 
+Only training is capped by `MAX_WALLCLOCK_SECONDS`. Export, final eval,
+artifact copy, and zipping are not wrapped in an outer kill timeout.
+
 Manual equivalent:
 
 ```bash
@@ -123,7 +126,7 @@ RUN_ID=blockdiff_sparse_ticket_1xh100 \
 DATA_PATH=./data/datasets/fineweb10B_sp1024 \
 TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model \
 VOCAB_SIZE=1024 \
-MAX_WALLCLOCK_SECONDS=3000 \
+MAX_WALLCLOCK_SECONDS=3600 \
 TRAIN_BATCH_TOKENS=65536 \
 VAL_BATCH_SIZE=65536 \
 VAL_LOSS_EVERY=10000 \
@@ -138,5 +141,5 @@ SPARSE_TARGET=0.30 \
 SPARSE_START_STEP=500 \
 SPARSE_END_STEP=4000 \
 SPARSE_EVERY=100 \
-timeout 3600s torchrun --standalone --nproc_per_node=1 working/blockdiff_sparse_ticket/train_gpt.py
+torchrun --standalone --nproc_per_node=1 working/blockdiff_sparse_ticket/train_gpt.py
 ```

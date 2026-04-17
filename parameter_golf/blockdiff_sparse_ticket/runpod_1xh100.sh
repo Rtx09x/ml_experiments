@@ -43,8 +43,8 @@ export DATA_PATH="${DATA_PATH:-./data/datasets/fineweb10B_sp1024}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-./data/tokenizers/fineweb_1024_bpe.model}"
 export VOCAB_SIZE="${VOCAB_SIZE:-1024}"
 
-# Keep training under 50 minutes so export/eval has room before the hard 1h timeout.
-export MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-3000}"
+# Cap training only. Export, eval, artifact copy, and zipping are allowed to finish.
+export MAX_WALLCLOCK_SECONDS="${MAX_WALLCLOCK_SECONDS:-3600}"
 export TRAIN_BATCH_TOKENS="${TRAIN_BATCH_TOKENS:-65536}"
 export VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-65536}"
 export VAL_LOSS_EVERY="${VAL_LOSS_EVERY:-10000}"
@@ -90,8 +90,7 @@ print(json.dumps({k: os.environ.get(k) for k in keys}, indent=2, sort_keys=True)
 PY
 
 set +e
-timeout "${HARD_TIMEOUT_SECONDS:-3600}" \
-  torchrun --standalone --nproc_per_node=1 working/blockdiff_sparse_ticket/train_gpt.py \
+torchrun --standalone --nproc_per_node=1 working/blockdiff_sparse_ticket/train_gpt.py \
   2>&1 | tee "${LOG_PATH}"
 TRAIN_RC=${PIPESTATUS[0]}
 set -e
