@@ -553,20 +553,24 @@ def build_mptrj_h5(root: Path, workers: int, snapshots: int, max_materials: int 
     return out
 
 
-def _extract_first_extxyz(zip_path: Path, dest_dir: Path) -> Path:
+def _extract_extxyz_files(zip_path: Path, dest_dir: Path) -> list[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path) as zf:
         members = [m for m in zf.namelist() if m.endswith(".extxyz")]
         if not members:
             raise RuntimeError(f"No extxyz file in {zip_path}")
-        member = members[0]
-        out = dest_dir / Path(member).name
-        if not out.exists():
+        out_paths = []
+        for member in tqdm(members, desc="Extract WBM extxyz", mininterval=5.0):
+            out = dest_dir / Path(member).name
+            out_paths.append(out)
+            if out.exists() and out.stat().st_size > 0:
+                continue
             zf.extract(member, dest_dir)
             extracted = dest_dir / member
             if extracted != out:
+                out.parent.mkdir(parents=True, exist_ok=True)
                 extracted.replace(out)
-        return out
+        return out_paths
 
 
 def build_wbm_h5(root: Path, workers: int, max_wbm: int | None) -> Path:
@@ -575,25 +579,31 @@ def build_wbm_h5(root: Path, workers: int, max_wbm: int | None) -> Path:
 
     manifest = json.loads((root / "manifest_downloads.json").read_text())
     elem_table = build_element_table()
-    extxyz = _extract_first_extxyz(Path(manifest["wbm_initial_zip"]), root / "raw" / "wbm_initial")
+    extxyz_files = _extract_extxyz_files(Path(manifest["wbm_initial_zip"]), root / "raw" / "wbm_initial")
     tasks = []
-    for i, atoms in enumerate(tqdm(iread(str(extxyz), format="extxyz"), desc="WBM structures", mininterval=5.0)):
-        if max_wbm and i >= max_wbm:
+    for path in tqdm(extxyz_files, desc="WBM files", mininterval=5.0):
+        if max_wbm and len(tasks) >= max_wbm:
             break
-        structure = AseAtomsAdaptor.get_structure(atoms)
-        mid = str(atoms.info.get("material_id") or atoms.info.get("mat_id") or atoms.info.get("id") or f"wbm-{i}")
-        n = len(structure)
-        if 0 < n <= MAX_ATOMS:
-            tasks.append(
-                {
-                    "material_id": mid,
-                    "structure": structure.as_dict(),
-                    "energy_pa": 0.0,
-                    "forces": np.zeros((n, 3), np.float32),
-                    "magmom": np.zeros(n, np.float32),
-                    "stress": np.zeros((3, 3), np.float32),
-                }
-            )
+        try:
+            for atoms in iread(str(path), format="extxyz"):
+                structure = AseAtomsAdaptor.get_structure(atoms)
+                mid = str(atoms.info.get("material_id") or atoms.info.get("mat_id") or atoms.info.get("id") or path.stem)
+                n = len(structure)
+                if 0 < n <= MAX_ATOMS:
+                    tasks.append(
+                        {
+                            "material_id": mid,
+                            "structure": structure.as_dict(),
+                            "energy_pa": 0.0,
+                            "forces": np.zeros((n, 3), np.float32),
+                            "magmom": np.zeros(n, np.float32),
+                            "stress": np.zeros((3, 3), np.float32),
+                        }
+                    )
+                if max_wbm and len(tasks) >= max_wbm:
+                    break
+        except Exception:
+            continue
     results = []
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_build_graph, task, elem_table) for task in tasks]
