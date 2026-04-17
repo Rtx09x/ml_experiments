@@ -112,6 +112,18 @@ The launcher writes:
 Only training is capped by `MAX_WALLCLOCK_SECONDS`. Export, final eval,
 artifact copy, and zipping are not wrapped in an outer kill timeout.
 
+Recover export from a saved pre-quant checkpoint:
+
+```bash
+cd /workspace
+rm -rf ml_experiments
+git clone https://github.com/Rtx09x/ml_experiments.git
+chmod +x ml_experiments/parameter_golf/blockdiff_sparse_ticket/runpod_1xh100.sh
+RUN_ID=blockdiff_sparse_ticket_1xh100_salvage \
+EXPORT_ONLY_CHECKPOINT=/workspace/parameter-golf/final_model_pre_quant.pt \
+./ml_experiments/parameter_golf/blockdiff_sparse_ticket/runpod_1xh100.sh
+```
+
 Manual equivalent:
 
 ```bash

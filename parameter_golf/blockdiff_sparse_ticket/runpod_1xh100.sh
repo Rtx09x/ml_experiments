@@ -94,6 +94,7 @@ export VALUE_RESIDUAL="${VALUE_RESIDUAL:-0}"
 export TRIGRAM="${TRIGRAM:-0}"
 export DTG_ENABLED="${DTG_ENABLED:-0}"
 export LAWA_ENABLED="${LAWA_ENABLED:-0}"
+export EXPORT_ONLY_CHECKPOINT="${EXPORT_ONLY_CHECKPOINT:-}"
 
 python3 - <<'PY' > "${RUN_DIR}/env.json"
 import json
@@ -108,6 +109,7 @@ keys = [
     "SPARSE_START_STEP", "SPARSE_END_STEP", "SPARSE_EVERY", "SPARSE_INCLUDE",
     "GPTQ_CALIB_BATCHES", "GATED_ATTENTION", "VALUE_RESIDUAL", "TRIGRAM",
     "DTG_ENABLED", "LAWA_ENABLED",
+    "EXPORT_ONLY_CHECKPOINT",
 ]
 print(json.dumps({k: os.environ.get(k) for k in keys}, indent=2, sort_keys=True))
 PY

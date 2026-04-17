@@ -116,6 +116,7 @@ class Hyperparameters:
     sparse_end_step = int(os.environ.get("SPARSE_END_STEP", 8000))
     sparse_every = int(os.environ.get("SPARSE_EVERY", 100))
     sparse_include = os.environ.get("SPARSE_INCLUDE", "mlp,attn")
+    export_only_checkpoint = os.environ.get("EXPORT_ONLY_CHECKPOINT", "")
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -2145,6 +2146,17 @@ def main() -> None:
         f"schedule:{args.sparse_start_step}->{args.sparse_end_step} every:{args.sparse_every} "
         f"include:{args.sparse_include}"
     )
+    if args.export_only_checkpoint:
+        ckpt_path = Path(args.export_only_checkpoint)
+        log0(f"export_only:loading checkpoint:{ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        missing, unexpected = base_model.load_state_dict(ckpt, strict=False)
+        log0(f"export_only:loaded missing:{len(missing)} unexpected:{len(unexpected)}")
+        args.iterations = 0
+        args.warmup_steps = 0
+        args.max_wallclock_seconds = 0.0
+        args.swa_enabled = False
+        args.lawa_enabled = False
     log0(f"seed:{args.seed}")
     train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
     def zero_grad_all() -> None:
