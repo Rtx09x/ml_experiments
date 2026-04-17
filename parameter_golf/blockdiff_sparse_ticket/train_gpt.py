@@ -703,14 +703,20 @@ class CausalSelfAttention(nn.Module):
                 group = self.num_heads // self.num_kv_heads
                 k_dense = k_dense.repeat_interleave(group, dim=2)
                 v_dense = v_dense.repeat_interleave(group, dim=2)
-            y = F.scaled_dot_product_attention(
-                q.transpose(1, 2),
-                k_dense.transpose(1, 2),
-                v_dense.transpose(1, 2),
-                attn_mask=attn_mask,
-                dropout_p=0.0,
-                is_causal=False,
-            ).transpose(1, 2)
+            with torch.backends.cuda.sdp_kernel(
+                enable_flash=True,
+                enable_mem_efficient=True,
+                enable_math=True,
+                enable_cudnn=False,
+            ):
+                y = F.scaled_dot_product_attention(
+                    q.transpose(1, 2),
+                    k_dense.transpose(1, 2),
+                    v_dense.transpose(1, 2),
+                    attn_mask=attn_mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                ).transpose(1, 2)
         if self.use_xsa:
             y = self._xsa_efficient(y, v)
         if self.gated_attention:
