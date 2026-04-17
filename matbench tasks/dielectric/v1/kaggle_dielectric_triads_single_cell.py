@@ -143,8 +143,11 @@ def set_seed(seed: int) -> None:
 
 def to_plain(obj):
     """Convert Matbench/monty/numpy objects into JSON-safe primitives."""
-    if hasattr(obj, "as_dict"):
-        return to_plain(obj.as_dict())
+    as_dict = getattr(obj, "as_dict", None)
+    if callable(as_dict):
+        return to_plain(as_dict())
+    if isinstance(as_dict, dict):
+        return to_plain(as_dict)
     if isinstance(obj, dict):
         return {str(k): to_plain(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
