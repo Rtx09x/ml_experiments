@@ -236,8 +236,10 @@ class DielectricCompositionFeaturizer:
 
     Layout:
       Magpie ElementProperty: 22 properties x 6 statistics = 132 features
-      Extra matminer composition features: ElementFraction, Stoichiometry,
-        ValenceOrbital, IonProperty, BandCenter
+      Extra fast composition features: ElementFraction, Stoichiometry,
+        ValenceOrbital, TMetalFraction, and lightweight dielectric chemistry
+        proxies. Slow oxidation-state/search featurizers are deliberately
+        avoided so one awkward formula cannot hang the Kaggle run.
       Mat2Vec pooled element embedding: 200 features
     """
 
@@ -249,14 +251,12 @@ class DielectricCompositionFeaturizer:
     ]
 
     def __init__(self, cache_dir="mat2vec_cache"):
-        from matminer.featurizers.base import MultipleFeaturizer
         from matminer.featurizers.composition import (
-            BandCenter,
             ElementFraction,
-            IonProperty,
             Stoichiometry,
             ValenceOrbital,
         )
+        from matminer.featurizers.composition.element import TMetalFraction
 
         self.ep_magpie = ElementProperty.from_preset("magpie")
         self.n_mg = len(self.ep_magpie.feature_labels())
@@ -264,13 +264,12 @@ class DielectricCompositionFeaturizer:
         self.mg_stat_dim = len(self.ep_magpie.stats)
         assert self.mg_n_props * self.mg_stat_dim == self.n_mg
 
-        self.extra_feats = MultipleFeaturizer([
-            ElementFraction(),
-            Stoichiometry(),
-            ValenceOrbital(),
-            IonProperty(),
-            BandCenter(),
-        ])
+        self.extra_featurizers = [
+            ("ElementFraction", ElementFraction()),
+            ("Stoichiometry", Stoichiometry()),
+            ("ValenceOrbital", ValenceOrbital()),
+            ("TMetalFraction", TMetalFraction()),
+        ]
         self.n_extra = None
         self.extra_labels = None
         self.scaler = None
@@ -312,18 +311,88 @@ class DielectricCompositionFeaturizer:
                 total += float(amount)
         return vec / max(total, 1e-8)
 
+    def _dielectric_proxies(self, comp):
+        from pymatgen.core.periodic_table import Element
+
+        amounts = comp.get_el_amt_dict()
+        total = max(float(sum(amounts.values())), 1e-8)
+        props = {
+            "X": [],
+            "atomic_mass": [],
+            "atomic_radius": [],
+            "average_ionic_radius": [],
+            "row": [],
+            "group": [],
+            "Z": [],
+            "is_metal": [],
+            "is_transition_metal": [],
+        }
+        weights = []
+        for symbol, amount in amounts.items():
+            frac = float(amount) / total
+            weights.append(frac)
+            try:
+                el = Element(symbol)
+                vals = {
+                    "X": float(el.X or 0.0),
+                    "atomic_mass": float(el.atomic_mass or 0.0),
+                    "atomic_radius": float(el.atomic_radius or 0.0),
+                    "average_ionic_radius": float(getattr(el, "average_ionic_radius", None) or 0.0),
+                    "row": float(el.row or 0.0),
+                    "group": float(el.group or 0.0),
+                    "Z": float(el.Z or 0.0),
+                    "is_metal": 1.0 if el.is_metal else 0.0,
+                    "is_transition_metal": 1.0 if el.is_transition_metal else 0.0,
+                }
+            except Exception:
+                vals = {k: 0.0 for k in props}
+            for k, v in vals.items():
+                props[k].append(v)
+
+        w = np.asarray(weights, dtype=np.float32)
+        feats = []
+        labels = []
+        for name, values in props.items():
+            x = np.asarray(values, dtype=np.float32)
+            mean = float(np.sum(w * x))
+            mn = float(np.min(x)) if len(x) else 0.0
+            mx = float(np.max(x)) if len(x) else 0.0
+            rng = mx - mn
+            var = float(np.sum(w * (x - mean) ** 2))
+            feats.extend([mean, rng, var])
+            labels.extend([f"{name}_wmean", f"{name}_range", f"{name}_wvar"])
+
+        entropy = -float(np.sum(w * np.log(np.clip(w, 1e-8, 1.0))))
+        n_elem = float(len(amounts))
+        max_frac = float(np.max(w)) if len(w) else 0.0
+        feats.extend([entropy, n_elem, max_frac])
+        labels.extend(["comp_entropy", "n_elements", "max_element_fraction"])
+
+        return np.asarray(feats, dtype=np.float32), labels
+
     def _safe_extra(self, comp):
-        try:
-            vals = np.asarray(self.extra_feats.featurize(comp), dtype=np.float32)
-        except Exception:
-            vals = np.zeros(self.n_extra or 119, dtype=np.float32)
-        vals = np.nan_to_num(vals, nan=0.0, posinf=0.0, neginf=0.0)
+        parts = []
+        labels = []
+        for name, ftzr in self.extra_featurizers:
+            try:
+                vals = np.asarray(ftzr.featurize(comp), dtype=np.float32)
+            except Exception:
+                vals = np.zeros(len(ftzr.feature_labels()), dtype=np.float32)
+            vals = np.nan_to_num(vals, nan=0.0, posinf=0.0, neginf=0.0)
+            parts.append(vals)
+            try:
+                labels.extend([f"{name}:{x}" for x in ftzr.feature_labels()])
+            except Exception:
+                labels.extend([f"{name}:{i}" for i in range(len(vals))])
+
+        proxy_vals, proxy_labels = self._dielectric_proxies(comp)
+        parts.append(proxy_vals)
+        labels.extend([f"DielectricProxy:{x}" for x in proxy_labels])
+
+        vals = np.concatenate(parts).astype(np.float32)
         if self.n_extra is None:
             self.n_extra = int(len(vals))
-            try:
-                self.extra_labels = list(self.extra_feats.feature_labels())
-            except Exception:
-                self.extra_labels = [f"extra_{i}" for i in range(self.n_extra)]
+            self.extra_labels = labels
         return vals
 
     def featurize_all(self, inputs, desc="Featurizing"):
