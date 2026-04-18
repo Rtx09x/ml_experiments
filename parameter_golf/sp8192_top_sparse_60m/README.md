@@ -1,4 +1,4 @@
-# SP8192 Top Stack + Sparse 60M
+# SP8192 Top Stack + Sparse 65M
 
 ## Problem
 
@@ -37,21 +37,24 @@ Kept:
 
 This is the practical run:
 
-- model width `672`
+- model width `704`
 - embedding width `512`
-- local shape count: `59,564,504` parameters
+- local shape count: `64,927,064` parameters
+- attention head size: `88`, valid for FlashAttention 3
 - sparsity target `50%`
 - sparse ramp from step `1000` to step `4000`
 - final export keeps the reached/trained sparsity level
 - sparsity thresholding stays on GPU
 - training wall clock cap: `4800s` / `80 min`
 
-Why 60M/50%:
+Why 65M/50%:
 
 - 102M/40% gave `1.0691` before bad export
 - 102M/62% gave `1.1077`
 - 102M/70% degraded hard
-- 60M/50% should fit the size target with less compression violence
+- `672` width would be closer to 60M, but head size `84` crashes FlashAttention 3
+- `704` width is the nearest sane upward size
+- 65M/50% should fit the size target with less compression violence than 102M
 
 Extra top-stack knobs included:
 
@@ -133,7 +136,7 @@ export VAL_BATCH_TOKENS=262144
 ## Expected Logs
 
 ```text
-model_params:59564504
+model_params:64927064
 muon_momentum: 0.97
 ttt_lr: 0.01
 layer_loop:enabled ...

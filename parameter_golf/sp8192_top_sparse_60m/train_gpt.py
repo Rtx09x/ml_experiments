@@ -115,6 +115,8 @@ class GPT(nn.Module):
 	def __init__(self,h):
 		super().__init__()
 		if h.logit_softcap<=.0:raise ValueError(f"logit_softcap must be positive, got {h.logit_softcap}")
+		if h.model_dim%h.num_heads!=0:raise ValueError(f"MODEL_DIM={h.model_dim} must divide NUM_HEADS={h.num_heads}")
+		if h.model_dim//h.num_heads%8!=0:raise ValueError(f"FlashAttention requires head_dim multiple of 8, got MODEL_DIM/NUM_HEADS={h.model_dim//h.num_heads}")
 		self.tie_embeddings=h.tie_embeddings;self.tied_embed_init_std=h.tied_embed_init_std;self.logit_softcap=h.logit_softcap;self.tok_emb=nn.Embedding(h.vocab_size,h.embedding_dim)
 		if h.embedding_dim!=h.model_dim:self.embed_proj=CastedLinear(h.embedding_dim,h.model_dim,bias=False);self.head_proj=CastedLinear(h.model_dim,h.embedding_dim,bias=False)
 		else:self.embed_proj=None;self.head_proj=None

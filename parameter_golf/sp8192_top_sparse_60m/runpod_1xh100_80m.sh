@@ -86,7 +86,7 @@ mkdir -p logs
 export RUN_ID
 export DATA_DIR="${DATA_DIR:-./data/}"
 export VOCAB_SIZE="${VOCAB_SIZE:-8192}"
-export MODEL_DIM="${MODEL_DIM:-672}"
+export MODEL_DIM="${MODEL_DIM:-704}"
 export EMBEDDING_DIM="${EMBEDDING_DIM:-512}"
 export NUM_LAYERS="${NUM_LAYERS:-11}"
 export XSA_LAST_N="${XSA_LAST_N:-11}"
