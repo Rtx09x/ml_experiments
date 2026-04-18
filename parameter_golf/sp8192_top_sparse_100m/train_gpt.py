@@ -179,8 +179,9 @@ def apply_magnitude_sparsity_(model,h,target):
 	total=sum(p.numel()for p in params)
 	if total==0 or target<=0:return 0,total
 	k=min(max(int(total*target),1),total)
-	chunks=[p.detach().abs().flatten().float().cpu()for p in params]
-	threshold=torch.kthvalue(torch.cat(chunks),k).values.to(device=params[0].device)
+	device=params[0].device
+	chunks=[p.detach().abs().flatten().to(device=device,dtype=torch.float32)for p in params]
+	threshold=torch.kthvalue(torch.cat(chunks),k).values
 	zeros=0
 	for p in params:
 		mask=p.detach().abs()<=threshold
@@ -272,7 +273,16 @@ def collect_hessians(model,train_loader,h,device,n_calibration_batches=64):
 	for name in hessians:hessians[name]=hessians[name].cpu()/n_calibration_batches
 	return hessians
 def gptq_quantize_weight(w,H,clip_sigmas=3.,clip_range=63,block_size=128):
-	W_orig=w.float().clone();rows,cols=W_orig.shape;H=H.float().clone();dead=torch.diag(H)==0;H[dead,dead]=1;damp=.01*H.diag().mean();H.diagonal().add_(damp);perm=torch.argsort(H.diag(),descending=True);invperm=torch.argsort(perm);W_perm=W_orig[:,perm].clone();W_perm[:,dead[perm]]=0;H=H[perm][:,perm];Hinv=torch.cholesky_inverse(torch.linalg.cholesky(H));Hinv=torch.linalg.cholesky(Hinv,upper=True);row_std=W_orig.std(dim=1);s=(clip_sigmas*row_std/clip_range).clamp_min(1e-10).to(torch.float16);sf=s.float();Q=torch.zeros(rows,cols,dtype=torch.int8);W_work=W_perm.clone()
+	W_orig=w.float().clone();rows,cols=W_orig.shape;H=H.float().clone();dead=torch.diag(H)==0;H[dead,dead]=1;base_damp=max(float((.01*H.diag().mean()).item()),1e-06);H.diagonal().add_(base_damp);perm=torch.argsort(H.diag(),descending=True);invperm=torch.argsort(perm);W_perm=W_orig[:,perm].clone();W_perm[:,dead[perm]]=0;H=H[perm][:,perm]
+	last_err=None
+	for attempt in range(6):
+		try:
+			chol=torch.linalg.cholesky(H);break
+		except RuntimeError as err:
+			last_err=err;H.diagonal().add_(base_damp*(10**attempt))
+	else:
+		raise last_err
+	Hinv=torch.cholesky_inverse(chol);Hinv=torch.linalg.cholesky(Hinv,upper=True);row_std=W_orig.std(dim=1);s=(clip_sigmas*row_std/clip_range).clamp_min(1e-10).to(torch.float16);sf=s.float();Q=torch.zeros(rows,cols,dtype=torch.int8);W_work=W_perm.clone()
 	for i1 in range(0,cols,block_size):
 		i2=min(i1+block_size,cols);W_block=W_work[:,i1:i2].clone();Hinv_block=Hinv[i1:i2,i1:i2];Err=torch.zeros(rows,i2-i1)
 		for j in range(i2-i1):w_col=W_block[:,j];d=Hinv_block[j,j];q_col=torch.clamp(torch.round(w_col/sf),-clip_range,clip_range);Q[:,i1+j]=q_col.to(torch.int8);err=(w_col-q_col.float()*sf)/d;Err[:,j]=err;W_block[:,j:]-=err.unsqueeze(1)*Hinv_block[j,j:].unsqueeze(0)
@@ -447,7 +457,10 @@ def train_model(h,device,val_data):
 	ema_state={name:t.detach().float().clone()for(name,t)in base_model.state_dict().items()};ema_decay=h.ema_decay;training_time_ms=.0;stop_after_step=None;torch.cuda.synchronize();t0=time.perf_counter();step=0
 	while True:
 		last_step=step==h.iterations or stop_after_step is not None and step>=stop_after_step;should_validate=last_step or h.val_loss_every>0 and step%h.val_loss_every==0
-		if should_validate:torch.cuda.synchronize();training_time_ms+=1e3*(time.perf_counter()-t0);val_loss,val_bpb=eval_val(h,device,val_data,model);log(f"{step}/{h.iterations} val_loss: {val_loss:.4f} val_bpb: {val_bpb:.4f}");torch.cuda.synchronize();t0=time.perf_counter()
+		if should_validate:
+			torch.cuda.synchronize();training_time_ms+=1e3*(time.perf_counter()-t0);val_loss,val_bpb=eval_val(h,device,val_data,model);log(f"{step}/{h.iterations} val_loss: {val_loss:.4f} val_bpb: {val_bpb:.4f}")
+			if h.is_main_process and step>0:torch.save(base_model.state_dict(),'latest_train_model.pt');log("Saved latest train checkpoint: latest_train_model.pt")
+			torch.cuda.synchronize();t0=time.perf_counter()
 		if last_step:
 			if stop_after_step is not None and step<h.iterations:log(f"stopping_early: wallclock_cap train_time: {training_time_ms:.0f}ms step: {step}/{h.iterations}")
 			break
@@ -467,6 +480,7 @@ def train_model(h,device,val_data):
 		if h.distributed and max_wallclock_ms is not None:reached_cap_tensor=torch.tensor(int(reached_cap),device=device);dist.all_reduce(reached_cap_tensor,op=dist.ReduceOp.MAX);reached_cap=bool(reached_cap_tensor.item())
 		if stop_after_step is None and reached_cap:stop_after_step=step
 	log(f"peak memory allocated: {torch.cuda.max_memory_allocated()//1024//1024} MiB reserved: {torch.cuda.max_memory_reserved()//1024//1024} MiB");log('ema:applying EMA weights');current_state=base_model.state_dict();avg_state={name:t.to(dtype=current_state[name].dtype)for(name,t)in ema_state.items()};base_model.load_state_dict(avg_state,strict=True)
+	if h.is_main_process:torch.save(base_model.state_dict(),'final_model_ema_before_sparse.pt');log("Saved EMA pre-sparsity checkpoint: final_model_ema_before_sparse.pt")
 	if h.sparse_enabled and h.sparse_target>0:
 		final_target=_sparse_target_for_step(h,step)
 		if final_target>0:

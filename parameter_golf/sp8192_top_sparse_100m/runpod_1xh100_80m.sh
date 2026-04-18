@@ -121,7 +121,7 @@ export GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-0.3}"
 export SPARSE_ENABLED="${SPARSE_ENABLED:-1}"
 export SPARSE_TARGET="${SPARSE_TARGET:-0.70}"
 export SPARSE_START_STEP="${SPARSE_START_STEP:-1000}"
-export SPARSE_END_STEP="${SPARSE_END_STEP:-7000}"
+export SPARSE_END_STEP="${SPARSE_END_STEP:-4400}"
 export SPARSE_EVERY="${SPARSE_EVERY:-100}"
 export SPARSE_INCLUDE="${SPARSE_INCLUDE:-mlp,attn}"
 
@@ -224,7 +224,7 @@ with csv_path.open("w", newline="") as f:
     writer.writerows(rows)
 PY
 
-for artifact in final_model.pt final_model_pre_quant.pt final_model.int6.ptz logs/"${RUN_ID}".txt; do
+for artifact in latest_train_model.pt final_model_ema_before_sparse.pt final_model.pt final_model_pre_quant.pt final_model.int6.ptz logs/"${RUN_ID}".txt; do
   if [ -f "${PARAMETER_GOLF_DIR}/${artifact}" ]; then
     cp "${PARAMETER_GOLF_DIR}/${artifact}" "${RUN_DIR}/$(basename "${artifact}")"
   fi

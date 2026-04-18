@@ -41,14 +41,17 @@ This variant changes the hypothesis:
 - target roughly `100M` parameters (`102.3M` by local shape count)
 - add magnitude sparsity on MLP and attention/projection matrices
 - ramp sparsity from `0%` to `70%`
-- default ramp: step `1000` to step `7000`
+- default ramp: step `1000` to step `4400`
 - final export keeps the reached/trained sparsity level instead of hard-pruning to `70%`
 - training wall clock cap: `4800s` / `80 min`
+- sparsity thresholding stays on GPU; the first version copied weights to CPU and wasted wall clock
 
 The script still exports:
 
 - `final_model.pt`
 - `final_model_pre_quant.pt`
+- `latest_train_model.pt`
+- `final_model_ema_before_sparse.pt`
 - `final_model.int6.ptz`
 - `train.log`
 - `metrics.csv`
@@ -100,6 +103,7 @@ Less brutal sparsity:
 
 ```bash
 export SPARSE_TARGET=0.50
+export SPARSE_END_STEP=4000
 ```
 
 Skip TTT eval if GPU money is burning:
@@ -164,3 +168,4 @@ pre-quantization post-ema val_bpb: 1.8265
 
 That proved the training path was good and the final hard prune was bad.
 This version does not do that hard final jump.
+This version also saves `latest_train_model.pt` at validation so a good checkpoint survives later export failures.
