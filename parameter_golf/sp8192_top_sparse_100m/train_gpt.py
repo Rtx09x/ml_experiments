@@ -161,7 +161,7 @@ class GPT(nn.Module):
 def classify_param(name):
 	if'tok_emb'in name or'lm_head'in name:return'embed'
 	if'.mlp.'in name:return'mlp'
-	if'.attn.'in name or'.proj.'in name and'.mlp.'not in name:return'attn'
+	if'.attn.'in name or name.startswith('embed_proj.')or name.startswith('head_proj.')or'.proj.'in name and'.mlp.'not in name:return'attn'
 	return'other'
 def _sparse_target_for_step(h,step):
 	if not h.sparse_enabled or h.sparse_target<=0:return 0.
@@ -283,6 +283,7 @@ def gptq_mixed_quantize(state_dict,hessians,h):
 	for(name,tensor)in state_dict.items():
 		t=tensor.detach().cpu().contiguous()
 		if not t.is_floating_point()or t.numel()<=65536:result[name]=t.to(torch.float16)if t.is_floating_point()else t;meta[name]='passthrough (float16)';continue
+		if name not in hessians:result[name]=t.to(torch.float16);meta[name]='passthrough missing-hessian (float16)';continue
 		cs=h.embed_clip_sigmas if'tok_emb'in name else h.matrix_clip_sigmas;bits=h.embed_bits if'tok_emb'in name else h.matrix_bits;q,s=gptq_quantize_weight(t,hessians[name],clip_sigmas=cs,clip_range=2**(bits-1)-1);result[name+'.q']=q;result[name+'.scale']=s;meta[name]=f"gptq (int{bits})"
 	categories=collections.defaultdict(set)
 	for(name,cat)in meta.items():short=re.sub('\\.\\d+$','',re.sub('blocks\\.\\d+','blocks',name));categories[cat].add(short)
@@ -467,8 +468,10 @@ def train_model(h,device,val_data):
 		if stop_after_step is None and reached_cap:stop_after_step=step
 	log(f"peak memory allocated: {torch.cuda.max_memory_allocated()//1024//1024} MiB reserved: {torch.cuda.max_memory_reserved()//1024//1024} MiB");log('ema:applying EMA weights');current_state=base_model.state_dict();avg_state={name:t.to(dtype=current_state[name].dtype)for(name,t)in ema_state.items()};base_model.load_state_dict(avg_state,strict=True)
 	if h.sparse_enabled and h.sparse_target>0:
-		zeros,total=apply_magnitude_sparsity_(base_model,h,h.sparse_target);actual=zeros/max(total,1)
-		log(f"sparsity:final target:{h.sparse_target:.3f} actual:{actual:.3f} include:{h.sparse_include}")
+		final_target=_sparse_target_for_step(h,step)
+		if final_target>0:
+			zeros,total=apply_magnitude_sparsity_(base_model,h,final_target);actual=zeros/max(total,1)
+			log(f"sparsity:final target:{final_target:.3f} actual:{actual:.3f} include:{h.sparse_include}")
 	return base_model,compiled_model
 def train_and_eval(h,device):
 	random.seed(h.seed);np.random.seed(h.seed);torch.manual_seed(h.seed);torch.cuda.manual_seed_all(h.seed);val_data=ValidationData(h,device);log(f"train_shards: {len(list(Path(h.datasets_dir).resolve().glob("fineweb_train_*.bin")))}");log(f"val_tokens: {val_data.val_tokens.numel()-1}");base_model,compiled_model=train_model(h,device,val_data);torch._dynamo.reset();timed_eval('pre-quantization post-ema',eval_val,h,device,val_data,compiled_model);serialize(h,base_model,Path(__file__).read_text(encoding='utf-8'))

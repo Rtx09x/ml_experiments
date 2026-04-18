@@ -42,6 +42,7 @@ This variant changes the hypothesis:
 - add magnitude sparsity on MLP and attention/projection matrices
 - ramp sparsity from `0%` to `70%`
 - default ramp: step `1000` to step `7000`
+- final export keeps the reached/trained sparsity level instead of hard-pruning to `70%`
 - training wall clock cap: `4800s` / `80 min`
 
 The script still exports:
@@ -145,3 +146,21 @@ If `pre-quantization post-ema` is bad, training/sparsity failed.
 If only quantized eval is bad, export/GPTQ failed.
 If TTT helps, good.
 If TTT does nothing, it is mostly expensive decoration here.
+
+## Notes From Failed 70% Export
+
+The first 80-minute run reached:
+
+```text
+4449 val_bpb: 1.0691
+trained sparsity: about 40%
+```
+
+Then the old export path hard-pruned to `70%` and destroyed it:
+
+```text
+pre-quantization post-ema val_bpb: 1.8265
+```
+
+That proved the training path was good and the final hard prune was bad.
+This version does not do that hard final jump.
