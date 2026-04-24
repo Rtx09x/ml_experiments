@@ -162,7 +162,7 @@ class GPT(nn.Module):
 		if self.head_proj is not None:x=self.head_proj(x)
 		if self.tie_embeddings:logits_proj=F.linear(x,self.tok_emb.weight)
 		else:logits_proj=self.lm_head(x)
-		return self.logit_softcap*torch.tanh(logits_proj/self.logit_softcap)
+		return self.logit_softcap*torch.tanh(logits_proj/self.logit_softcap)+self.blockdiff_mask_embed.sum().to(dtype=logits_proj.dtype)*0.
 	def chunkdiff_loss(self,input_ids,chunk_size,mask_min,mask_max):
 		bsz,seqlen=input_ids.shape;dev=input_ids.device
 		if seqlen<chunk_size*2:return input_ids.new_zeros((),dtype=torch.float32)
