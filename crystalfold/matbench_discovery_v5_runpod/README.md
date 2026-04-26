@@ -88,6 +88,10 @@ The main practical differences:
 - start with `--batch-size 256`
 - use `--no-pin-memory`
 
+If you want the shortest possible setup, use
+[MI300X_QUICKSTART.md](./MI300X_QUICKSTART.md) and
+[runpod_mi300x_hf.sh](./runpod_mi300x_hf.sh).
+
 ## Notes
 
 - The CPU build stores both raw official downloads and processed files under
