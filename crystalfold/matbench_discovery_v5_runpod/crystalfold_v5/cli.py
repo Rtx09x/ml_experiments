@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--grad-clip", type=float, default=1.0)
     t.add_argument("--amp", choices=["bf16", "fp16", "off"], default="bf16")
     t.add_argument("--compile", action="store_true")
+    t.add_argument("--no-pin-memory", action="store_true")
     t.add_argument("--local-copy", default=None)
     t.add_argument("--resume", default=None)
     t.set_defaults(func=run_train)

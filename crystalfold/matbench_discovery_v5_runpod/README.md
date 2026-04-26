@@ -76,6 +76,18 @@ python -m crystalfold_v5.cli train \
   --local-copy /workspace
 ```
 
+## MI300X
+
+There is a separate ROCm-oriented note in [MI300X.md](./MI300X.md) and a helper
+bootstrap script in [runpod_1xmi300x.sh](./runpod_1xmi300x.sh).
+
+The main practical differences:
+
+- do not use `--compile` on the first MI300X run
+- keep `--amp bf16`
+- start with `--batch-size 256`
+- use `--no-pin-memory`
+
 ## Notes
 
 - The CPU build stores both raw official downloads and processed files under
@@ -84,4 +96,3 @@ python -m crystalfold_v5.cli train \
   Figshare metadata for reproducibility.
 - The WBM preprocessing artifact is written to
   `processed/wbm_initial_v5.h5`; training does not need it, evaluation does.
-
