@@ -59,6 +59,7 @@ MLP_MULT=4
 VOCAB_SIZE=8192
 SPARSE_TARGET=0.50
 MATRIX_BITS=4
+EXPORT_EMA=0
 ```
 
 The denoising adapter adds about 262k parameters plus tiny timestep/mask embeddings.
@@ -84,6 +85,7 @@ TRAIN_LOG_EVERY=100 \
 CHUNKDIFF_SEQ_LEN=128 \
 SPARSE_TARGET=0.50 \
 MATRIX_BITS=4 \
+EXPORT_EMA=0 \
 ./ml_experiments/parameter_golf/sp8192_chunkdiff_v3/runpod_8xh100.sh
 ```
 

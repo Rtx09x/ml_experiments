@@ -526,8 +526,13 @@ def train_model(h,device,val_data):
 		reached_cap=max_wallclock_ms is not None and approx_training_time_ms>=max_wallclock_ms
 		if h.distributed and max_wallclock_ms is not None:reached_cap_tensor=torch.tensor(int(reached_cap),device=device);dist.all_reduce(reached_cap_tensor,op=dist.ReduceOp.MAX);reached_cap=bool(reached_cap_tensor.item())
 		if stop_after_step is None and reached_cap:stop_after_step=step
-	log(f"peak memory allocated: {torch.cuda.max_memory_allocated()//1024//1024} MiB reserved: {torch.cuda.max_memory_reserved()//1024//1024} MiB");log('ema:applying EMA weights');current_state=base_model.state_dict();avg_state={name:t.to(dtype=current_state[name].dtype)for(name,t)in ema_state.items()};base_model.load_state_dict(avg_state,strict=True)
-	if h.is_main_process:torch.save(base_model.state_dict(),'final_model_ema_before_sparse.pt');log("Saved EMA pre-sparsity checkpoint: final_model_ema_before_sparse.pt")
+	log(f"peak memory allocated: {torch.cuda.max_memory_allocated()//1024//1024} MiB reserved: {torch.cuda.max_memory_reserved()//1024//1024} MiB");export_ema=bool(int(os.environ.get('EXPORT_EMA','0')))
+	if export_ema:
+		log('ema:applying EMA weights');current_state=base_model.state_dict();avg_state={name:t.to(dtype=current_state[name].dtype)for(name,t)in ema_state.items()};base_model.load_state_dict(avg_state,strict=True)
+		if h.is_main_process:torch.save(base_model.state_dict(),'final_model_ema_before_sparse.pt');log("Saved EMA pre-sparsity checkpoint: final_model_ema_before_sparse.pt")
+	else:
+		log('ema:skipping EMA export; using latest train weights')
+		if h.is_main_process:torch.save(base_model.state_dict(),'final_model_train_before_sparse.pt');log("Saved train pre-sparsity checkpoint: final_model_train_before_sparse.pt")
 	if h.sparse_enabled and h.sparse_target>0:
 		final_target=_sparse_target_for_step(h,step)
 		if final_target>0:
@@ -535,7 +540,7 @@ def train_model(h,device,val_data):
 			log(f"sparsity:final target:{final_target:.3f} actual:{actual:.3f} include:{h.sparse_include}")
 	return base_model,compiled_model
 def train_and_eval(h,device):
-	random.seed(h.seed);np.random.seed(h.seed);torch.manual_seed(h.seed);torch.cuda.manual_seed_all(h.seed);val_data=ValidationData(h,device);log(f"train_shards: {len(list(Path(h.datasets_dir).resolve().glob("fineweb_train_*.bin")))}");log(f"val_tokens: {val_data.val_tokens.numel()-1}");base_model,compiled_model=train_model(h,device,val_data);torch._dynamo.reset();timed_eval('pre-quantization post-ema',eval_val,h,device,val_data,compiled_model);serialize(h,base_model,Path(__file__).read_text(encoding='utf-8'))
+	random.seed(h.seed);np.random.seed(h.seed);torch.manual_seed(h.seed);torch.cuda.manual_seed_all(h.seed);val_data=ValidationData(h,device);log(f"train_shards: {len(list(Path(h.datasets_dir).resolve().glob("fineweb_train_*.bin")))}");log(f"val_tokens: {val_data.val_tokens.numel()-1}");base_model,compiled_model=train_model(h,device,val_data);torch._dynamo.reset();eval_label='pre-quantization post-ema' if bool(int(os.environ.get('EXPORT_EMA','0'))) else 'pre-quantization train-weights';timed_eval(eval_label,eval_val,h,device,val_data,compiled_model);serialize(h,base_model,Path(__file__).read_text(encoding='utf-8'))
 	if h.distributed:dist.barrier()
 	eval_model=deserialize(h,device)
 	if h.num_loops>0:eval_model.looping_active=True

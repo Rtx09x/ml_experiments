@@ -167,7 +167,7 @@ keys = [
     "SPARSE_ENABLED", "SPARSE_TARGET", "SPARSE_START_STEP",
     "SPARSE_END_STEP", "SPARSE_EVERY", "SPARSE_INCLUDE", "CHUNKDIFF_ENABLED", "CHUNKDIFF_WEIGHT", "CHUNKDIFF_CHUNK_SIZE", "CHUNKDIFF_MASK_MIN", "CHUNKDIFF_MASK_MAX", "CHUNKDIFF_EVERY", "CHUNKDIFF_MIN_STEP", "CHUNKDIFF_SEQ_LEN", "CHUNKDIFF_STEPS", "CHUNKDIFF_TIME_COND", "CHUNKDIFF_DENOISE_ADAPTER", "COMPRESSOR",
     "MATRIX_BITS", "EMBED_BITS", "MATRIX_CLIP_SIGMAS", "EMBED_CLIP_SIGMAS",
-    "GPTQ_CALIBRATION_BATCHES", "GPTQ_RESERVE_SECONDS",
+    "GPTQ_CALIBRATION_BATCHES", "GPTQ_RESERVE_SECONDS", "EXPORT_EMA",
     "SLIDING_WINDOW_ENABLED", "TTT_ENABLED", "TTT_LR", "TTT_EPOCHS",
     "TTT_MOMENTUM", "TTT_CHUNK_TOKENS",
 ]
@@ -193,7 +193,7 @@ return_code = int(sys.argv[4])
 
 train_re = re.compile(r"(?P<step>\d+)/(?P<iters>\d+) train_loss: (?P<train_loss>[0-9.]+)(?: chunkdiff_loss: (?P<chunkdiff_loss>[0-9.]+))? train_time: (?P<train_time_min>[0-9.]+)m tok/s: (?P<tok_per_sec>[0-9.]+)")
 val_re = re.compile(r"(?P<step>\d+)/(?P<iters>\d+) val_loss: (?P<val_loss>[0-9.]+) val_bpb: (?P<val_bpb>[0-9.]+)")
-eval_re = re.compile(r"(?P<label>pre-quantization post-ema|quantized|quantized_sliding_window|quantized_ttt) val_loss:(?P<val_loss>[0-9.]+) val_bpb:(?P<val_bpb>[0-9.]+) eval_time:(?P<eval_time_ms>[0-9.]+)ms")
+eval_re = re.compile(r"(?P<label>pre-quantization post-ema|pre-quantization train-weights|quantized|quantized_sliding_window|quantized_ttt) val_loss:(?P<val_loss>[0-9.]+) val_bpb:(?P<val_bpb>[0-9.]+) eval_time:(?P<eval_time_ms>[0-9.]+)ms")
 sparse_re = re.compile(r"sparsity:(?P<kind>step:\d+|final) target:(?P<target>[0-9.]+) actual:(?P<actual>[0-9.]+) include:(?P<include>.+)")
 size_re = re.compile(r"Total submission size quantized\+[^:]+: (?P<bytes>\d+) bytes")
 quant_re = re.compile(r"Serialized model quantized\+[^:]+: (?P<bytes>\d+) bytes")
@@ -236,7 +236,7 @@ with csv_path.open("w", newline="") as f:
     writer.writerows(rows)
 PY
 
-for artifact in latest_train_model.pt final_model_ema_before_sparse.pt final_model.pt final_model_pre_quant.pt final_model.int4.ptz final_model.int6.ptz logs/"${RUN_ID}".txt; do
+for artifact in latest_train_model.pt final_model_train_before_sparse.pt final_model_ema_before_sparse.pt final_model.pt final_model_pre_quant.pt final_model.int4.ptz final_model.int6.ptz logs/"${RUN_ID}".txt; do
   if [ -f "${PARAMETER_GOLF_DIR}/${artifact}" ]; then
     cp "${PARAMETER_GOLF_DIR}/${artifact}" "${RUN_DIR}/$(basename "${artifact}")"
   fi
