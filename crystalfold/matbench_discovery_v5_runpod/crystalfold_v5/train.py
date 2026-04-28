@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from .data import FlatGraphDataset, collate_graphs
 from .model import ConfigV5, CrystalFoldV5, DiscoveryLoss
+from .relax import FIREConfig, FIRERelaxer
 
 
 def build_model_config(preset: str) -> ConfigV5:
@@ -131,27 +132,47 @@ def probe_wbm(
     device: torch.device,
     amp: str,
     out_path: Path,
+    fire_cfg: FIREConfig,
     max_batches: int | None = None,
 ) -> dict[str, float]:
     model.eval()
-    rows: list[tuple[str, float]] = []
+    rows: list[tuple[str, float, int, int]] = []
     dtype = torch.bfloat16 if amp == "bf16" else torch.float16
-    with torch.no_grad():
-        for i, batch in enumerate(tqdm(loader, desc="wbm", leave=False, mininterval=5.0)):
-            if max_batches is not None and i >= max_batches:
+    for i, batch in enumerate(tqdm(loader, desc="wbm_relax", leave=False, mininterval=5.0)):
+        if max_batches is not None and i >= max_batches:
+            break
+        mids = batch["material_ids"]
+        batch = move_batch(batch, device)
+        positions = materialize_positions(batch)
+        batch["edge_shift_cart"] = materialize_edge_shift_cart(batch)
+        relaxer = FIRERelaxer(fire_cfg)
+        relaxer.init(batch["crystal_sizes_list"], positions)
+        for _ in range(fire_cfg.max_steps):
+            if relaxer.all_converged:
                 break
-            mids = batch["material_ids"]
-            batch = move_batch(batch, device)
+            pos = relaxer.positions.detach().requires_grad_(True)
             with autocast(device_type=device.type, dtype=dtype, enabled=amp != "off" and device.type == "cuda"):
-                out = model(batch, positions=None)
-            pred = scaler.inverse(out["final_pred"].float()).detach().cpu().tolist()
-            rows.extend(zip(mids, pred))
+                out = model(batch, positions=pos)
+                total_e = CrystalFoldV5.total_energy_from_energy_per_atom(out["final_pred"], batch["crystal_sizes"])
+            pred_f_norm = -torch.autograd.grad(total_e, pos, create_graph=False, retain_graph=False)[0]
+            forces_phys = pred_f_norm.detach() * scaler.iqr
+            pred_epa_phys = scaler.inverse(out["final_pred"].float())
+            relaxer.step(forces_phys, pred_epa_phys)
+        with torch.no_grad():
+            with autocast(device_type=device.type, dtype=dtype, enabled=amp != "off" and device.type == "cuda"):
+                out_final = model(batch, positions=relaxer.positions)
+            pred = scaler.inverse(out_final["final_pred"].float()).detach().cpu().tolist()
+        conv = relaxer.converged_mask()
+        steps = relaxer.steps_used()
+        rows.extend((mid, e, st, int(ok)) for mid, e, st, ok in zip(mids, pred, steps, conv))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["material_id", "pred_energy_per_atom"])
+        writer.writerow(["material_id", "pred_energy_per_atom", "relax_steps", "converged"])
         writer.writerows(rows)
     vals = np.array([x[1] for x in rows], dtype=np.float64)
+    steps = np.array([x[2] for x in rows], dtype=np.float64)
+    conv = np.array([x[3] for x in rows], dtype=np.float64)
     order = np.argsort(vals)[: min(10, len(vals))]
     top_ids = [rows[int(i)][0] for i in order]
     return {
@@ -160,6 +181,9 @@ def probe_wbm(
         "std": float(vals.std()) if len(vals) else 0.0,
         "min": float(vals.min()) if len(vals) else 0.0,
         "max": float(vals.max()) if len(vals) else 0.0,
+        "relax_steps_mean": float(steps.mean()) if len(steps) else 0.0,
+        "relax_steps_max": float(steps.max()) if len(steps) else 0.0,
+        "converged_frac": float(conv.mean()) if len(conv) else 0.0,
         "top_ids": top_ids,
     }
 
@@ -216,6 +240,7 @@ def run_train(args: argparse.Namespace) -> None:
     scaler = EnergyScaler.from_dataset(dataset_path)
     (run_dir / "scaler.json").write_text(json.dumps(scaler.to_json(), indent=2))
     cfg = build_model_config(args.model_preset)
+    fire_cfg = FIREConfig(max_steps=args.wbm_relax_steps, fmax_threshold=args.wbm_fmax)
     model = CrystalFoldV5(cfg).to(device)
     if args.compile and hasattr(torch, "compile"):
         model = torch.compile(model)
@@ -321,7 +346,7 @@ def run_train(args: argparse.Namespace) -> None:
         }
         if wbm_loader is not None and args.wbm_every > 0 and (epoch + 1) % args.wbm_every == 0:
             probe_path = run_dir / "wbm_probe" / f"epoch_{epoch + 1:03d}.csv"
-            wbm_stats = probe_wbm(model, wbm_loader, scaler, device, args.amp, probe_path, args.wbm_max_batches)
+            wbm_stats = probe_wbm(model, wbm_loader, scaler, device, args.amp, probe_path, fire_cfg, args.wbm_max_batches)
             row["wbm_probe"] = wbm_stats
         history.append(row)
         (run_dir / "history.json").write_text(json.dumps(history, indent=2))
@@ -357,6 +382,8 @@ def run_train(args: argparse.Namespace) -> None:
                 f"wbm_probe epoch={epoch + 1} "
                 f"n={int(w['n'])} mean={w['mean']:.5f} std={w['std']:.5f} "
                 f"min={w['min']:.5f} max={w['max']:.5f} "
+                f"conv={w['converged_frac']:.3f} steps_mean={w['relax_steps_mean']:.1f} "
+                f"steps_max={w['relax_steps_max']:.0f} "
                 f"csv={run_dir / 'wbm_probe' / f'epoch_{epoch + 1:03d}.csv'}"
             )
 

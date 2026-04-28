@@ -41,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--wbm-dataset", default=None)
     t.add_argument("--wbm-every", type=int, default=10)
     t.add_argument("--wbm-max-batches", type=int, default=None)
+    t.add_argument("--wbm-relax-steps", type=int, default=200)
+    t.add_argument("--wbm-fmax", type=float, default=0.05)
     t.add_argument("--local-copy", default=None)
     t.add_argument("--resume", default=None)
     t.set_defaults(func=run_train)
