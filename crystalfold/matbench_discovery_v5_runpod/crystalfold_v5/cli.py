@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--batch-size", type=int, default=192)
     t.add_argument("--workers", type=int, default=8)
     t.add_argument("--prefetch-factor", type=int, default=4)
+    t.add_argument("--model-preset", choices=["base", "large", "xlarge"], default="base")
     t.add_argument("--train-frac", type=float, default=0.9)
     t.add_argument("--seed", type=int, default=42)
     t.add_argument("--lr", type=float, default=3e-4)

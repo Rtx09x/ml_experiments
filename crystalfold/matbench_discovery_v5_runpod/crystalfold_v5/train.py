@@ -18,6 +18,32 @@ from .data import FlatGraphDataset, collate_graphs
 from .model import ConfigV5, CrystalFoldV5, DiscoveryLoss
 
 
+def build_model_config(preset: str) -> ConfigV5:
+    if preset == "base":
+        return ConfigV5()
+    if preset == "large":
+        return ConfigV5(
+            d_model=320,
+            d_edge=160,
+            d_comp=160,
+            n_heads=8,
+            d_ff=640,
+            n_gat_layers=3,
+            max_cycles=8,
+        )
+    if preset == "xlarge":
+        return ConfigV5(
+            d_model=384,
+            d_edge=192,
+            d_comp=192,
+            n_heads=8,
+            d_ff=768,
+            n_gat_layers=4,
+            max_cycles=10,
+        )
+    raise ValueError(f"unknown model preset: {preset}")
+
+
 class EnergyScaler:
     def __init__(self, median: float, iqr: float):
         self.median = float(median)
@@ -135,7 +161,7 @@ def run_train(args: argparse.Namespace) -> None:
 
     scaler = EnergyScaler.from_dataset(dataset_path)
     (run_dir / "scaler.json").write_text(json.dumps(scaler.to_json(), indent=2))
-    cfg = ConfigV5()
+    cfg = build_model_config(args.model_preset)
     model = CrystalFoldV5(cfg).to(device)
     if args.compile and hasattr(torch, "compile"):
         model = torch.compile(model)
@@ -180,6 +206,7 @@ def run_train(args: argparse.Namespace) -> None:
         model.train()
         t0 = time.time()
         losses, maes = [], []
+        energy_losses, force_losses = [], []
         pbar = tqdm(train_loader, desc=f"epoch {epoch + 1}/{args.epochs}", mininterval=5.0)
         force_epoch = epoch >= args.energy_only_epochs
         for step_idx, batch in enumerate(pbar):
@@ -214,8 +241,12 @@ def run_train(args: argparse.Namespace) -> None:
                 mae = float((pred_phys - batch["energy_per_atom"]).abs().mean().detach().cpu())
             losses.append(float(loss.detach().cpu()))
             maes.append(mae)
+            energy_losses.append(float(info["energy_loss"]))
+            force_losses.append(float(info["force_loss"]))
             pbar.set_postfix(
                 loss=np.mean(losses[-20:]),
+                e=np.mean(energy_losses[-20:]),
+                f=np.mean(force_losses[-20:]),
                 mae=np.mean(maes[-20:]),
                 lr=scheduler.get_last_lr()[0],
                 force=int(use_force),
@@ -225,9 +256,12 @@ def run_train(args: argparse.Namespace) -> None:
         row = {
             "epoch": epoch,
             "train_loss": float(np.mean(losses)),
+            "train_energy_loss": float(np.mean(energy_losses)),
+            "train_force_loss": float(np.mean(force_losses)),
             "train_mae": float(np.mean(maes)),
             "val_mae": val_mae,
             "seconds": time.time() - t0,
+            "force_step_frac": float(sum(1 for x in force_losses if x > 0.0) / max(len(force_losses), 1)),
         }
         history.append(row)
         (run_dir / "history.json").write_text(json.dumps(history, indent=2))
@@ -246,5 +280,15 @@ def run_train(args: argparse.Namespace) -> None:
         if val_mae < best_mae:
             best_mae = val_mae
             torch.save(ckpt, run_dir / "best.pt")
-        print(f"epoch={epoch + 1} train_mae={row['train_mae']:.5f} val_mae={val_mae:.5f} best={best_mae:.5f}")
+        print(
+            f"epoch={epoch + 1} "
+            f"train_loss={row['train_loss']:.5f} "
+            f"energy_loss={row['train_energy_loss']:.5f} "
+            f"force_loss={row['train_force_loss']:.5f} "
+            f"train_mae={row['train_mae']:.5f} "
+            f"val_mae={val_mae:.5f} "
+            f"best_val={best_mae:.5f} "
+            f"force_frac={row['force_step_frac']:.3f} "
+            f"sec={row['seconds']:.1f}"
+        )
 
