@@ -70,7 +70,7 @@ prepare_run_dir() {
 }
 
 run_train() {
-  local nproc iterations max_wall val_every log_every train_tokens val_batch chunkdiff_every chunkdiff_weight chunkdiff_seq_len
+  local nproc iterations max_wall val_every log_every train_tokens val_batch chunkdiff_every chunkdiff_weight chunkdiff_seq_len ppm_subset
   if [[ "${MODE}" == "smoke" ]]; then
     nproc="${NPROC_PER_NODE:-1}"
     iterations="${ITERATIONS:-250}"
@@ -82,6 +82,7 @@ run_train() {
     chunkdiff_every="${CHUNKDIFF_EVERY:-4}"
     chunkdiff_weight="${CHUNKDIFF_WEIGHT:-0.006}"
     chunkdiff_seq_len="${CHUNKDIFF_SEQ_LEN:-192}"
+    ppm_subset="${PPM_SUBSET_TOKENS:-262144}"
   else
     nproc="${NPROC_PER_NODE:-$(detect_gpus)}"
     iterations="${ITERATIONS:-20000}"
@@ -93,6 +94,7 @@ run_train() {
     chunkdiff_every="${CHUNKDIFF_EVERY:-4}"
     chunkdiff_weight="${CHUNKDIFF_WEIGHT:-0.006}"
     chunkdiff_seq_len="${CHUNKDIFF_SEQ_LEN:-256}"
+    ppm_subset="${PPM_SUBSET_TOKENS:-2000000}"
   fi
 
   cd "${RUN_DIR}"
@@ -124,6 +126,12 @@ run_train() {
   CHUNKDIFF_MASK_MIN="${CHUNKDIFF_MASK_MIN:-0.15}" \
   CHUNKDIFF_MASK_MAX="${CHUNKDIFF_MASK_MAX:-0.55}" \
   CHUNKDIFF_STEPS="${CHUNKDIFF_STEPS:-8}" \
+  PPM_ENABLED="${PPM_ENABLED:-1}" \
+  PPM_ORDER="${PPM_ORDER:-5}" \
+  PPM_SUBSET_TOKENS="${ppm_subset}" \
+  PPM_LAMBDA_HI="${PPM_LAMBDA_HI:-0.35}" \
+  PPM_LAMBDA_LO="${PPM_LAMBDA_LO:-0.02}" \
+  PPM_CONF_THRESHOLD="${PPM_CONF_THRESHOLD:-0.08}" \
   torchrun --standalone --nproc_per_node="${nproc}" train_gpt.py
 }
 

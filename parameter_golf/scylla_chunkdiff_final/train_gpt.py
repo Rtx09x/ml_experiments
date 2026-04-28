@@ -96,6 +96,12 @@ class Hyperparameters:
     chunkdiff_mask_min = float(os.environ.get("CHUNKDIFF_MASK_MIN", "0.15"))
     chunkdiff_mask_max = float(os.environ.get("CHUNKDIFF_MASK_MAX", "0.55"))
     chunkdiff_steps = int(os.environ.get("CHUNKDIFF_STEPS", "8"))
+    ppm_enabled = bool(int(os.environ.get("PPM_ENABLED", "1")))
+    ppm_order = int(os.environ.get("PPM_ORDER", "5"))
+    ppm_subset_tokens = int(os.environ.get("PPM_SUBSET_TOKENS", "2000000"))
+    ppm_lambda_hi = float(os.environ.get("PPM_LAMBDA_HI", "0.35"))
+    ppm_lambda_lo = float(os.environ.get("PPM_LAMBDA_LO", "0.02"))
+    ppm_conf_threshold = float(os.environ.get("PPM_CONF_THRESHOLD", "0.08"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1472,6 +1478,104 @@ def eval_val_sliding_ttt(
     return val_loss, val_bpb
 
 
+def _ppm_token_logprob(target: int, ctx: tuple[int, ...], tables: list[dict[tuple[int, ...], dict[int, int]]], vocab_size: int) -> tuple[float, float]:
+    best_total = 0
+    best_count = 0
+    for order in range(min(len(ctx), len(tables) - 1), -1, -1):
+        counts = tables[order].get(ctx[-order:] if order else ())
+        if not counts:
+            continue
+        total = sum(counts.values())
+        count = counts.get(target, 0)
+        if total > best_total:
+            best_total, best_count = total, count
+        if count > 0:
+            prob = (count + 0.5) / (total + 0.5 * vocab_size)
+            return math.log(max(prob, 1e-12)), count / max(total, 1)
+    return math.log(1.0 / vocab_size), (best_count / max(best_total, 1)) if best_total else 0.0
+
+
+def _ppm_token_update(token: int, ctx: tuple[int, ...], tables: list[dict[tuple[int, ...], dict[int, int]]]) -> tuple[int, ...]:
+    for order in range(len(tables)):
+        key = ctx[-order:] if order else ()
+        bucket = tables[order].setdefault(key, {})
+        bucket[token] = bucket.get(token, 0) + 1
+    return (ctx + (token,))[-(len(tables) - 1):]
+
+
+def eval_val_token_ppm_mixture(
+    args: Hyperparameters,
+    base_model: nn.Module,
+    device: torch.device,
+    val_tokens: Tensor,
+    base_bytes_lut: Tensor,
+    has_leading_space_lut: Tensor,
+    is_boundary_token_lut: Tensor,
+    log0=print,
+) -> tuple[float, float, float]:
+    subset = min(int(args.ppm_subset_tokens), int(val_tokens.numel() - 1))
+    if subset <= 0:
+        return float("nan"), float("nan"), float("nan")
+    seq_len = args.eval_seq_len
+    batch_seqs = max(1, int(args.val_batch_size // max(seq_len, 1)))
+    tables: list[dict[tuple[int, ...], dict[int, int]]] = [{} for _ in range(max(args.ppm_order, 0) + 1)]
+    ctx: tuple[int, ...] = ()
+    mix_nll = nn_nll = ppm_nll = byte_count = 0.0
+    token_count = 0
+    base_bytes_cpu = base_bytes_lut.detach().cpu().numpy()
+    has_space_cpu = has_leading_space_lut.detach().cpu().numpy()
+    is_boundary_cpu = is_boundary_token_lut.detach().cpu().numpy()
+    tokens_cpu = val_tokens[: subset + 1].detach().cpu().numpy().astype(np.int64)
+    base_model.eval()
+    compiled_logits = torch.compile(base_model.forward_logits, dynamic=False, fullgraph=True)
+    t0 = time.perf_counter()
+    with torch.inference_mode():
+        for start in range(0, subset, seq_len * batch_seqs):
+            end = min(start + seq_len * batch_seqs, subset)
+            usable = ((end - start) // seq_len) * seq_len
+            if usable <= 0:
+                break
+            local = val_tokens[start:start + usable + 1].to(device=device, dtype=torch.int64, non_blocking=True)
+            x = local[:-1].reshape(-1, seq_len)
+            y = local[1:].reshape(-1, seq_len)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                logits = compiled_logits(x)
+                per_tok = F.cross_entropy(logits.reshape(-1, logits.size(-1)).float(), y.reshape(-1), reduction="none")
+            losses = per_tok.detach().cpu().numpy().astype(np.float64)
+            for offset, neural_nll in enumerate(losses):
+                abs_pos = start + offset
+                target = int(tokens_cpu[abs_pos + 1])
+                prev = int(tokens_cpu[abs_pos])
+                tb = float(base_bytes_cpu[target])
+                if bool(has_space_cpu[target]) and not bool(is_boundary_cpu[prev]):
+                    tb += 1.0
+                if tb <= 0:
+                    continue
+                ppm_logp, confidence = _ppm_token_logprob(target, ctx, tables, args.vocab_size)
+                lam = args.ppm_lambda_lo if confidence >= args.ppm_conf_threshold else args.ppm_lambda_hi
+                nn_logp = -float(neural_nll)
+                m = max(nn_logp, ppm_logp)
+                mix_logp = m + math.log((1.0 - lam) * math.exp(nn_logp - m) + lam * math.exp(ppm_logp - m))
+                mix_nll += -mix_logp
+                nn_nll += float(neural_nll)
+                ppm_nll += -ppm_logp
+                byte_count += tb
+                token_count += 1
+                ctx = _ppm_token_update(target, ctx, tables)
+    elapsed = time.perf_counter() - t0
+    nn_bpb = nn_nll / math.log(2.0) / max(byte_count, 1.0)
+    ppm_bpb = ppm_nll / math.log(2.0) / max(byte_count, 1.0)
+    mix_bpb = mix_nll / math.log(2.0) / max(byte_count, 1.0)
+    log0(
+        f"token_ppm_mix tokens:{token_count} bytes:{byte_count:.0f} "
+        f"mix_bpb:{mix_bpb:.8f} nn_only:{nn_bpb:.8f} ppm_only:{ppm_bpb:.8f} "
+        f"order:{args.ppm_order} lambda_hi:{args.ppm_lambda_hi} lambda_lo:{args.ppm_lambda_lo} "
+        f"time:{elapsed:.1f}s"
+    )
+    base_model.train()
+    return mix_bpb, nn_bpb, ppm_bpb
+
+
 # --- GPTQ-lite int6 quantization ---
 
 def _classify_param(name: str) -> str:
@@ -2250,6 +2354,22 @@ def main() -> None:
         )
         log0(f"final_int6_sliding_window_s64_exact val_loss:{sw64_val_loss:.8f} val_bpb:{sw64_val_bpb:.8f}")
         log0(f"final_int8_zlib_roundtrip_exact val_loss:{sw64_val_loss:.8f} val_bpb:{sw64_val_bpb:.8f}")
+    if args.ppm_enabled:
+        if distributed:
+            dist.barrier()
+        if master_process:
+            eval_val_token_ppm_mixture(
+                args,
+                eval_model,
+                device,
+                val_tokens,
+                base_bytes_lut,
+                has_leading_space_lut,
+                is_boundary_token_lut,
+                log0=log0,
+            )
+        if distributed:
+            dist.barrier()
     # Legal score-first TTT (PR #461 recipe)
     if args.ttt_enabled:
         torch.cuda.synchronize()
