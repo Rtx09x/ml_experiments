@@ -67,6 +67,19 @@ class RBFLayer(nn.Module):
         return torch.exp(-self.log_gamma.exp().reshape(1, -1) * (d - self.centers.reshape(1, -1)).pow(2))
 
 
+def pad_by_sizes(x: torch.Tensor, sizes: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
+    b = len(sizes)
+    max_n = max(sizes)
+    pad = x.new_zeros(b, max_n, x.size(-1))
+    mask = torch.ones(b, max_n, dtype=torch.bool, device=x.device)
+    offset = 0
+    for i, sz in enumerate(sizes):
+        pad[i, :sz] = x[offset : offset + sz]
+        mask[i, :sz] = False
+        offset += sz
+    return pad, mask
+
+
 def compute_dynamic_edges(
     positions: torch.Tensor,
     edge_index: torch.Tensor,
@@ -109,12 +122,13 @@ class GATLayer(nn.Module):
         max_per_dst = torch.full((n, self.n_h), -torch.inf, device=x.device, dtype=score.dtype)
         max_per_dst.scatter_reduce_(0, dst[:, None].expand(-1, self.n_h), score, reduce="amax", include_self=True)
         alpha = torch.exp(score - max_per_dst[dst])
-        den = torch.zeros(n, self.n_h, device=x.device, dtype=score.dtype)
-        den.scatter_add_(0, dst[:, None].expand(-1, self.n_h), alpha)
+        den = torch.zeros(n, self.n_h, device=x.device, dtype=alpha.dtype)
+        den.index_add_(0, dst, alpha)
 
-        num = torch.zeros(n, self.n_h, self.d_h, device=x.device, dtype=v.dtype)
-        num.scatter_add_(0, dst[:, None, None].expand(-1, self.n_h, self.d_h), alpha[..., None] * v)
-        agg = (num / (den[:, :, None] + 1e-8)).reshape(n, -1)
+        msg = (alpha[..., None] * v).reshape(-1, self.n_h * self.d_h).to(v.dtype)
+        num = torch.zeros(n, self.n_h * self.d_h, device=x.device, dtype=msg.dtype)
+        num.index_add_(0, dst, msg)
+        agg = (num.view(n, self.n_h, self.d_h) / (den[:, :, None].to(num.dtype) + 1e-8)).reshape(n, -1)
         y = self.norm(self.gate(self.out(agg), x))
         return self.ff(y)
 
@@ -128,15 +142,7 @@ class FullSelfAttention(nn.Module):
         self.ff = FeedForward(cfg.d_model, cfg.d_model * 2)
 
     def forward(self, x: torch.Tensor, sizes: list[int]) -> torch.Tensor:
-        b = len(sizes)
-        max_n = max(sizes)
-        pad = x.new_zeros(b, max_n, x.size(-1))
-        mask = torch.ones(b, max_n, dtype=torch.bool, device=x.device)
-        offset = 0
-        for i, sz in enumerate(sizes):
-            pad[i, :sz] = x[offset : offset + sz]
-            mask[i, :sz] = False
-            offset += sz
+        pad, mask = pad_by_sizes(x, sizes)
         out, _ = self.attn(pad, pad, pad, key_padding_mask=mask)
         pieces = []
         offset = 0
@@ -181,8 +187,6 @@ class TRMCycle(nn.Module):
     def __init__(self, cfg: ConfigV5):
         super().__init__()
         self.atom_sa = FullSelfAttention(cfg)
-        self.cross_q = nn.Linear(cfg.d_model, cfg.d_model)
-        self.cross_k = nn.Linear(cfg.d_model, cfg.d_model)
         self.cross_v = nn.Linear(cfg.d_model, cfg.d_model)
         self.cross_out = nn.Linear(cfg.d_model, cfg.d_model)
         self.gate = GatedResidual(cfg.d_model)
@@ -191,17 +195,11 @@ class TRMCycle(nn.Module):
 
     def forward(self, x: torch.Tensor, comp: torch.Tensor, sizes: list[int]) -> torch.Tensor:
         h = self.atom_sa(x, sizes)
-        pieces = []
-        offset = 0
-        for b, sz in enumerate(sizes):
-            xb = h[offset : offset + sz]
-            q = self.cross_q(xb)
-            k = self.cross_k(comp[b : b + 1])
-            v = self.cross_v(comp[b : b + 1])
-            attn = torch.softmax((q @ k.T) / math.sqrt(q.size(-1)), dim=-1) @ v
-            pieces.append(attn)
-            offset += sz
-        c = self.cross_out(torch.cat(pieces, dim=0))
+        # There is only one composition token per crystal, so cross-attention
+        # collapses to broadcasting a transformed composition context.
+        comp_ctx = self.cross_out(self.cross_v(comp))
+        repeat_sizes = torch.as_tensor(sizes, device=comp.device, dtype=torch.long)
+        c = torch.repeat_interleave(comp_ctx, repeat_sizes, dim=0)
         return self.ff(self.norm(self.gate(c, h)))
 
 
@@ -212,15 +210,12 @@ class EnergyHead(nn.Module):
         self.mlp = nn.Sequential(nn.Linear(d, d), nn.SiLU(), nn.Linear(d, d // 2), nn.SiLU(), nn.Linear(d // 2, 1))
 
     def forward(self, x: torch.Tensor, sizes: list[int]) -> torch.Tensor:
-        outs = []
-        offset = 0
-        for sz in sizes:
-            xb = x[offset : offset + sz]
-            w = torch.softmax(self.attn(xb).squeeze(-1), dim=0)
-            pooled = (w[:, None] * xb).sum(0)
-            outs.append(self.mlp(pooled).squeeze(-1))
-            offset += sz
-        return torch.stack(outs)
+        pad, mask = pad_by_sizes(x, sizes)
+        logits = self.attn(pad).squeeze(-1)
+        logits = logits.masked_fill(mask, -torch.inf)
+        weights = torch.softmax(logits, dim=1)
+        pooled = (weights.unsqueeze(-1) * pad).sum(dim=1)
+        return self.mlp(pooled).squeeze(-1)
 
 
 class CrystalFoldV5(nn.Module):
@@ -255,7 +250,9 @@ class CrystalFoldV5(nn.Module):
                 self.cfg.cutoff,
             )
             edge_feat = torch.cat([dyn, batch["edge_static"]], dim=-1)
-        sizes = [int(x) for x in batch["crystal_sizes"].detach().cpu().tolist()]
+        sizes = batch.get("crystal_sizes_list")
+        if sizes is None:
+            sizes = [int(x) for x in batch["crystal_sizes"].detach().cpu().tolist()]
         x = self.struct(batch["atom_features"], edge_feat, batch["edge_index"], sizes)
         comp = self.comp(batch["comp_features"], batch["global_features"])
         cycle_preds = []
@@ -303,4 +300,3 @@ class DiscoveryLoss(nn.Module):
         total = torch.exp(-self.log_var_energy) * e_loss + self.log_var_energy
         total = total + torch.exp(-self.log_var_force) * f_loss + self.log_var_force
         return total, {"energy_loss": float(e_loss.detach()), "force_loss": float(f_loss.detach())}
-

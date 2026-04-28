@@ -698,6 +698,7 @@ def collate_graphs(samples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         "global_features": torch.stack([torch.as_tensor(s["global_features"], dtype=torch.float32) for s in samples]),
         "energy_per_atom": torch.as_tensor([s["energy_per_atom"] for s in samples], dtype=torch.float32),
         "crystal_sizes": torch.as_tensor(sizes, dtype=torch.long),
+        "crystal_sizes_list": sizes,
     }
 
 
