@@ -50,6 +50,16 @@ def move_batch(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str
     return {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
 
+def materialize_positions(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    lattice_per_atom = batch["lattice"].index_select(0, batch["atom_graph_index"])
+    return torch.bmm(batch["frac_coords"].unsqueeze(1), lattice_per_atom).squeeze(1)
+
+
+def materialize_edge_shift_cart(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    lattice_per_edge = batch["lattice"].index_select(0, batch["edge_graph_index"])
+    return torch.bmm(batch["edge_shift"].unsqueeze(1), lattice_per_edge).squeeze(1)
+
+
 def maybe_local_copy(dataset: Path, local_root: str | None) -> Path:
     if not local_root:
         return dataset
@@ -64,11 +74,20 @@ def maybe_local_copy(dataset: Path, local_root: str | None) -> Path:
     return dst
 
 
-def evaluate(model: CrystalFoldV5, loader: DataLoader, scaler: EnergyScaler, device: torch.device, amp: str) -> float:
+def evaluate(
+    model: CrystalFoldV5,
+    loader: DataLoader,
+    scaler: EnergyScaler,
+    device: torch.device,
+    amp: str,
+    max_batches: int | None = None,
+) -> float:
     model.eval()
     maes = []
     with torch.no_grad():
-        for batch in tqdm(loader, desc="val", leave=False, mininterval=5.0):
+        for i, batch in enumerate(tqdm(loader, desc="val", leave=False, mininterval=5.0)):
+            if max_batches is not None and i >= max_batches:
+                break
             batch = move_batch(batch, device)
             dtype = torch.bfloat16 if amp == "bf16" else torch.float16
             with autocast(device_type=device.type, dtype=dtype, enabled=amp != "off" and device.type == "cuda"):
@@ -79,6 +98,8 @@ def evaluate(model: CrystalFoldV5, loader: DataLoader, scaler: EnergyScaler, dev
 
 
 def run_train(args: argparse.Namespace) -> None:
+    args.force_every = max(1, int(args.force_every))
+    args.energy_only_epochs = max(0, int(args.energy_only_epochs))
     dataset_path = maybe_local_copy(Path(args.dataset), args.local_copy)
     run_dir = Path(args.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -98,6 +119,7 @@ def run_train(args: argparse.Namespace) -> None:
         collate_fn=collate_graphs,
         pin_memory=True,
         persistent_workers=args.workers > 0,
+        prefetch_factor=args.prefetch_factor if args.workers > 0 else None,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -108,6 +130,7 @@ def run_train(args: argparse.Namespace) -> None:
         collate_fn=collate_graphs,
         pin_memory=True,
         persistent_workers=args.workers > 1,
+        prefetch_factor=args.prefetch_factor if args.workers > 0 else None,
     )
 
     scaler = EnergyScaler.from_dataset(dataset_path)
@@ -157,19 +180,39 @@ def run_train(args: argparse.Namespace) -> None:
         model.train()
         t0 = time.time()
         losses, maes = [], []
+        energy_losses, force_losses = [], []
         pbar = tqdm(train_loader, desc=f"epoch {epoch + 1}/{args.epochs}", mininterval=5.0)
-        for batch in pbar:
+        force_epoch = epoch >= args.energy_only_epochs
+        for step_idx, batch in enumerate(pbar):
             batch = move_batch(batch, device)
             target_e = scaler.transform(batch["energy_per_atom"])
-            positions = batch["positions"].clone().requires_grad_(True)
             optimizer.zero_grad(set_to_none=True)
+            use_force = force_epoch and (step_idx % args.force_every == 0)
             with autocast(device_type=device.type, dtype=dtype, enabled=args.amp != "off" and device.type == "cuda"):
-                out = model(batch, positions=positions)
-                force_total = CrystalFoldV5.total_energy_from_energy_per_atom(out["final_pred"], batch["crystal_sizes"])
-            pred_f_norm = -torch.autograd.grad(force_total, positions, create_graph=True, retain_graph=True)[0]
-            target_f_norm = batch["forces"] / scaler.iqr
-            with autocast(device_type=device.type, dtype=dtype, enabled=args.amp != "off" and device.type == "cuda"):
-                loss, info = criterion(out["final_pred"], target_e, pred_f_norm, target_f_norm, out["cycle_preds"])
+                if use_force:
+                    positions = materialize_positions(batch).detach().requires_grad_(True)
+                    batch["edge_shift_cart"] = materialize_edge_shift_cart(batch)
+                    out = model(batch, positions=positions)
+                    force_total = CrystalFoldV5.total_energy_from_energy_per_atom(out["final_pred"], batch["crystal_sizes"])
+                else:
+                    out = model(batch, positions=None)
+            if use_force:
+                pred_f_norm = -torch.autograd.grad(force_total, positions, create_graph=True, retain_graph=True)[0]
+                target_f_norm = batch["forces"] / scaler.iqr
+                with autocast(device_type=device.type, dtype=dtype, enabled=args.amp != "off" and device.type == "cuda"):
+                    loss, info = criterion(out["final_pred"], target_e, pred_f_norm, target_f_norm, out["cycle_preds"])
+            else:
+                with autocast(device_type=device.type, dtype=dtype, enabled=args.amp != "off" and device.type == "cuda"):
+                    pred_e = out["final_pred"]
+                    cycle_preds = out["cycle_preds"]
+                    e_loss = torch.nn.functional.huber_loss(pred_e, target_e, delta=0.1)
+                    if cycle_preds is not None and cycle_preds.size(0) > 1:
+                        ds = torch.stack(
+                            [torch.nn.functional.huber_loss(cycle_preds[i], target_e, delta=0.1) for i in range(cycle_preds.size(0) - 1)]
+                        ).mean()
+                        e_loss = 0.7 * e_loss + 0.3 * ds
+                    loss = torch.exp(-criterion.log_var_energy) * e_loss + criterion.log_var_energy
+                    info = {"energy_loss": float(e_loss.detach()), "force_loss": 0.0}
             grad_scaler.scale(loss).backward()
             grad_scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(criterion.parameters()), args.grad_clip)
@@ -181,15 +224,27 @@ def run_train(args: argparse.Namespace) -> None:
                 mae = float((pred_phys - batch["energy_per_atom"]).abs().mean().detach().cpu())
             losses.append(float(loss.detach().cpu()))
             maes.append(mae)
-            pbar.set_postfix(loss=np.mean(losses[-20:]), mae=np.mean(maes[-20:]), lr=scheduler.get_last_lr()[0])
+            energy_losses.append(float(info["energy_loss"]))
+            force_losses.append(float(info["force_loss"]))
+            pbar.set_postfix(
+                loss=np.mean(losses[-20:]),
+                e=np.mean(energy_losses[-20:]),
+                f=np.mean(force_losses[-20:]),
+                mae=np.mean(maes[-20:]),
+                lr=scheduler.get_last_lr()[0],
+                force=int(use_force),
+            )
 
-        val_mae = evaluate(model, val_loader, scaler, device, args.amp)
+        val_mae = evaluate(model, val_loader, scaler, device, args.amp, args.val_max_batches)
         row = {
             "epoch": epoch,
             "train_loss": float(np.mean(losses)),
+            "train_energy_loss": float(np.mean(energy_losses)),
+            "train_force_loss": float(np.mean(force_losses)),
             "train_mae": float(np.mean(maes)),
             "val_mae": val_mae,
             "seconds": time.time() - t0,
+            "force_step_frac": float(sum(1 for x in force_losses if x > 0.0) / max(len(force_losses), 1)),
         }
         history.append(row)
         (run_dir / "history.json").write_text(json.dumps(history, indent=2))
@@ -208,5 +263,15 @@ def run_train(args: argparse.Namespace) -> None:
         if val_mae < best_mae:
             best_mae = val_mae
             torch.save(ckpt, run_dir / "best.pt")
-        print(f"epoch={epoch + 1} train_mae={row['train_mae']:.5f} val_mae={val_mae:.5f} best={best_mae:.5f}")
+        print(
+            f"epoch={epoch + 1} "
+            f"train_loss={row['train_loss']:.5f} "
+            f"energy_loss={row['train_energy_loss']:.5f} "
+            f"force_loss={row['train_force_loss']:.5f} "
+            f"train_mae={row['train_mae']:.5f} "
+            f"val_mae={val_mae:.5f} "
+            f"best_val={best_mae:.5f} "
+            f"force_frac={row['force_step_frac']:.3f} "
+            f"sec={row['seconds']:.1f}"
+        )
 
