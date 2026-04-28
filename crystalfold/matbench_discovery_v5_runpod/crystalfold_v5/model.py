@@ -300,3 +300,16 @@ class DiscoveryLoss(nn.Module):
         total = torch.exp(-self.log_var_energy) * e_loss + self.log_var_energy
         total = total + torch.exp(-self.log_var_force) * f_loss + self.log_var_force
         return total, {"energy_loss": float(e_loss.detach()), "force_loss": float(f_loss.detach())}
+
+    def energy_only(
+        self,
+        pred_e: torch.Tensor,
+        target_e: torch.Tensor,
+        cycle_preds: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        e_loss = F.huber_loss(pred_e, target_e, delta=0.1)
+        if cycle_preds is not None and cycle_preds.size(0) > 1:
+            ds = torch.stack([F.huber_loss(cycle_preds[i], target_e, delta=0.1) for i in range(cycle_preds.size(0) - 1)]).mean()
+            e_loss = 0.7 * e_loss + 0.3 * ds
+        total = torch.exp(-self.log_var_energy) * e_loss + self.log_var_energy
+        return total, {"energy_loss": float(e_loss.detach()), "force_loss": 0.0}

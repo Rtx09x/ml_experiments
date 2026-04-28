@@ -64,11 +64,20 @@ def maybe_local_copy(dataset: Path, local_root: str | None) -> Path:
     return dst
 
 
-def evaluate(model: CrystalFoldV5, loader: DataLoader, scaler: EnergyScaler, device: torch.device, amp: str) -> float:
+def evaluate(
+    model: CrystalFoldV5,
+    loader: DataLoader,
+    scaler: EnergyScaler,
+    device: torch.device,
+    amp: str,
+    max_batches: int | None = None,
+) -> float:
     model.eval()
     maes = []
     with torch.no_grad():
-        for batch in tqdm(loader, desc="val", leave=False, mininterval=5.0):
+        for i, batch in enumerate(tqdm(loader, desc="val", leave=False, mininterval=5.0)):
+            if max_batches is not None and i >= max_batches:
+                break
             batch = move_batch(batch, device)
             dtype = torch.bfloat16 if amp == "bf16" else torch.float16
             with autocast(device_type=device.type, dtype=dtype, enabled=amp != "off" and device.type == "cuda"):
@@ -79,6 +88,8 @@ def evaluate(model: CrystalFoldV5, loader: DataLoader, scaler: EnergyScaler, dev
 
 
 def run_train(args: argparse.Namespace) -> None:
+    args.force_every = max(1, int(args.force_every))
+    args.energy_only_epochs = max(0, int(args.energy_only_epochs))
     dataset_path = maybe_local_copy(Path(args.dataset), args.local_copy)
     run_dir = Path(args.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -158,18 +169,27 @@ def run_train(args: argparse.Namespace) -> None:
         t0 = time.time()
         losses, maes = [], []
         pbar = tqdm(train_loader, desc=f"epoch {epoch + 1}/{args.epochs}", mininterval=5.0)
-        for batch in pbar:
+        force_epoch = epoch >= args.energy_only_epochs
+        for step_idx, batch in enumerate(pbar):
             batch = move_batch(batch, device)
             target_e = scaler.transform(batch["energy_per_atom"])
-            positions = batch["positions"].clone().requires_grad_(True)
             optimizer.zero_grad(set_to_none=True)
+            use_force = force_epoch and (step_idx % args.force_every == 0)
             with autocast(device_type=device.type, dtype=dtype, enabled=args.amp != "off" and device.type == "cuda"):
-                out = model(batch, positions=positions)
-                force_total = CrystalFoldV5.total_energy_from_energy_per_atom(out["final_pred"], batch["crystal_sizes"])
-            pred_f_norm = -torch.autograd.grad(force_total, positions, create_graph=True, retain_graph=True)[0]
-            target_f_norm = batch["forces"] / scaler.iqr
-            with autocast(device_type=device.type, dtype=dtype, enabled=args.amp != "off" and device.type == "cuda"):
-                loss, info = criterion(out["final_pred"], target_e, pred_f_norm, target_f_norm, out["cycle_preds"])
+                if use_force:
+                    positions = batch["positions"].detach().requires_grad_(True)
+                    out = model(batch, positions=positions)
+                    force_total = CrystalFoldV5.total_energy_from_energy_per_atom(out["final_pred"], batch["crystal_sizes"])
+                else:
+                    out = model(batch, positions=None)
+            if use_force:
+                pred_f_norm = -torch.autograd.grad(force_total, positions, create_graph=True, retain_graph=True)[0]
+                target_f_norm = batch["forces"] / scaler.iqr
+                with autocast(device_type=device.type, dtype=dtype, enabled=args.amp != "off" and device.type == "cuda"):
+                    loss, info = criterion(out["final_pred"], target_e, pred_f_norm, target_f_norm, out["cycle_preds"])
+            else:
+                with autocast(device_type=device.type, dtype=dtype, enabled=args.amp != "off" and device.type == "cuda"):
+                    loss, info = criterion.energy_only(out["final_pred"], target_e, out["cycle_preds"])
             grad_scaler.scale(loss).backward()
             grad_scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(criterion.parameters()), args.grad_clip)
@@ -181,9 +201,14 @@ def run_train(args: argparse.Namespace) -> None:
                 mae = float((pred_phys - batch["energy_per_atom"]).abs().mean().detach().cpu())
             losses.append(float(loss.detach().cpu()))
             maes.append(mae)
-            pbar.set_postfix(loss=np.mean(losses[-20:]), mae=np.mean(maes[-20:]), lr=scheduler.get_last_lr()[0])
+            pbar.set_postfix(
+                loss=np.mean(losses[-20:]),
+                mae=np.mean(maes[-20:]),
+                lr=scheduler.get_last_lr()[0],
+                force=int(use_force),
+            )
 
-        val_mae = evaluate(model, val_loader, scaler, device, args.amp)
+        val_mae = evaluate(model, val_loader, scaler, device, args.amp, args.val_max_batches)
         row = {
             "epoch": epoch,
             "train_loss": float(np.mean(losses)),
