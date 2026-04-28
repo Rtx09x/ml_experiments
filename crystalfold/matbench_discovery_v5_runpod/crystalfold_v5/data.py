@@ -672,28 +672,26 @@ class FlatGraphDataset(Dataset):
 def collate_graphs(samples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
     sizes = [int(s["n_atoms"]) for s in samples]
     edge_indices = []
-    edge_shift_cart = []
     atom_offset = 0
+    atom_graph_index = []
+    edge_graph_index = []
     for s in samples:
         ei = torch.as_tensor(s["edge_index"], dtype=torch.long) + atom_offset
         edge_indices.append(ei)
-        shifts = torch.as_tensor(s["edge_shift"], dtype=torch.float32)
-        lattice = torch.as_tensor(s["lattice"], dtype=torch.float32)
-        edge_shift_cart.append(shifts @ lattice)
+        atom_graph_index.append(torch.full((int(s["n_atoms"]),), len(atom_graph_index), dtype=torch.long))
+        edge_graph_index.append(torch.full((ei.shape[1],), len(edge_graph_index), dtype=torch.long))
         atom_offset += int(s["n_atoms"])
-    positions = [
-        torch.as_tensor(s["frac_coords"], dtype=torch.float32) @ torch.as_tensor(s["lattice"], dtype=torch.float32)
-        for s in samples
-    ]
     return {
         "atom_features": torch.cat([torch.as_tensor(s["atom_features"], dtype=torch.float32) for s in samples], dim=0),
-        "positions": torch.cat(positions, dim=0),
+        "frac_coords": torch.cat([torch.as_tensor(s["frac_coords"], dtype=torch.float32) for s in samples], dim=0),
         "forces": torch.cat([torch.as_tensor(s["forces"], dtype=torch.float32) for s in samples], dim=0),
         "edge_index": torch.cat(edge_indices, dim=1),
+        "edge_shift": torch.cat([torch.as_tensor(s["edge_shift"], dtype=torch.float32) for s in samples], dim=0),
         "edge_features": torch.cat([torch.as_tensor(s["edge_features"], dtype=torch.float32) for s in samples], dim=0),
         "edge_static": torch.cat([torch.as_tensor(s["edge_static"], dtype=torch.float32) for s in samples], dim=0),
-        "edge_shift_cart": torch.cat(edge_shift_cart, dim=0),
         "lattice": torch.stack([torch.as_tensor(s["lattice"], dtype=torch.float32) for s in samples]),
+        "atom_graph_index": torch.cat(atom_graph_index, dim=0),
+        "edge_graph_index": torch.cat(edge_graph_index, dim=0),
         "comp_features": torch.stack([torch.as_tensor(s["comp_features"], dtype=torch.float32) for s in samples]),
         "global_features": torch.stack([torch.as_tensor(s["global_features"], dtype=torch.float32) for s in samples]),
         "energy_per_atom": torch.as_tensor([s["energy_per_atom"] for s in samples], dtype=torch.float32),

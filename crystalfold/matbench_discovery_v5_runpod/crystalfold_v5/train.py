@@ -50,6 +50,16 @@ def move_batch(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str
     return {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
 
+def materialize_positions(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    lattice_per_atom = batch["lattice"].index_select(0, batch["atom_graph_index"])
+    return torch.bmm(batch["frac_coords"].unsqueeze(1), lattice_per_atom).squeeze(1)
+
+
+def materialize_edge_shift_cart(batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    lattice_per_edge = batch["lattice"].index_select(0, batch["edge_graph_index"])
+    return torch.bmm(batch["edge_shift"].unsqueeze(1), lattice_per_edge).squeeze(1)
+
+
 def maybe_local_copy(dataset: Path, local_root: str | None) -> Path:
     if not local_root:
         return dataset
@@ -109,6 +119,7 @@ def run_train(args: argparse.Namespace) -> None:
         collate_fn=collate_graphs,
         pin_memory=True,
         persistent_workers=args.workers > 0,
+        prefetch_factor=args.prefetch_factor if args.workers > 0 else None,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -119,6 +130,7 @@ def run_train(args: argparse.Namespace) -> None:
         collate_fn=collate_graphs,
         pin_memory=True,
         persistent_workers=args.workers > 1,
+        prefetch_factor=args.prefetch_factor if args.workers > 0 else None,
     )
 
     scaler = EnergyScaler.from_dataset(dataset_path)
@@ -177,7 +189,8 @@ def run_train(args: argparse.Namespace) -> None:
             use_force = force_epoch and (step_idx % args.force_every == 0)
             with autocast(device_type=device.type, dtype=dtype, enabled=args.amp != "off" and device.type == "cuda"):
                 if use_force:
-                    positions = batch["positions"].detach().requires_grad_(True)
+                    positions = materialize_positions(batch).detach().requires_grad_(True)
+                    batch["edge_shift_cart"] = materialize_edge_shift_cart(batch)
                     out = model(batch, positions=positions)
                     force_total = CrystalFoldV5.total_energy_from_energy_per_atom(out["final_pred"], batch["crystal_sizes"])
                 else:
