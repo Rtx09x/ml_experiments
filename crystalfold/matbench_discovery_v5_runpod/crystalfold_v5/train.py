@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import shutil
 import time
@@ -123,6 +124,46 @@ def evaluate(
     return float(torch.cat(maes).mean())
 
 
+def probe_wbm(
+    model: CrystalFoldV5,
+    loader: DataLoader,
+    scaler: EnergyScaler,
+    device: torch.device,
+    amp: str,
+    out_path: Path,
+    max_batches: int | None = None,
+) -> dict[str, float]:
+    model.eval()
+    rows: list[tuple[str, float]] = []
+    dtype = torch.bfloat16 if amp == "bf16" else torch.float16
+    with torch.no_grad():
+        for i, batch in enumerate(tqdm(loader, desc="wbm", leave=False, mininterval=5.0)):
+            if max_batches is not None and i >= max_batches:
+                break
+            mids = batch["material_ids"]
+            batch = move_batch(batch, device)
+            with autocast(device_type=device.type, dtype=dtype, enabled=amp != "off" and device.type == "cuda"):
+                out = model(batch, positions=None)
+            pred = scaler.inverse(out["final_pred"].float()).detach().cpu().tolist()
+            rows.extend(zip(mids, pred))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["material_id", "pred_energy_per_atom"])
+        writer.writerows(rows)
+    vals = np.array([x[1] for x in rows], dtype=np.float64)
+    order = np.argsort(vals)[: min(10, len(vals))]
+    top_ids = [rows[int(i)][0] for i in order]
+    return {
+        "n": float(len(rows)),
+        "mean": float(vals.mean()) if len(vals) else 0.0,
+        "std": float(vals.std()) if len(vals) else 0.0,
+        "min": float(vals.min()) if len(vals) else 0.0,
+        "max": float(vals.max()) if len(vals) else 0.0,
+        "top_ids": top_ids,
+    }
+
+
 def run_train(args: argparse.Namespace) -> None:
     args.force_every = max(1, int(args.force_every))
     args.energy_only_epochs = max(0, int(args.energy_only_epochs))
@@ -137,6 +178,7 @@ def run_train(args: argparse.Namespace) -> None:
 
     train_ds = FlatGraphDataset(dataset_path, split="train", train_frac=args.train_frac, seed=args.seed)
     val_ds = FlatGraphDataset(dataset_path, split="val", train_frac=args.train_frac, seed=args.seed)
+    wbm_ds = FlatGraphDataset(args.wbm_dataset, split="all") if args.wbm_dataset else None
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
@@ -158,6 +200,18 @@ def run_train(args: argparse.Namespace) -> None:
         persistent_workers=args.workers > 1,
         prefetch_factor=args.prefetch_factor if args.workers > 0 else None,
     )
+    wbm_loader = None
+    if wbm_ds is not None:
+        wbm_loader = DataLoader(
+            wbm_ds,
+            batch_size=max(1, args.batch_size * 2),
+            shuffle=False,
+            num_workers=max(1, args.workers // 2),
+            collate_fn=collate_graphs,
+            pin_memory=True,
+            persistent_workers=args.workers > 1,
+            prefetch_factor=args.prefetch_factor if args.workers > 0 else None,
+        )
 
     scaler = EnergyScaler.from_dataset(dataset_path)
     (run_dir / "scaler.json").write_text(json.dumps(scaler.to_json(), indent=2))
@@ -191,10 +245,12 @@ def run_train(args: argparse.Namespace) -> None:
 
     meta = {
         "dataset": str(dataset_path),
+        "wbm_dataset": str(args.wbm_dataset) if args.wbm_dataset else None,
         "device": str(device),
         "parameters": (model._orig_mod if hasattr(model, "_orig_mod") else model).count_parameters(),
         "train_samples": len(train_ds),
         "val_samples": len(val_ds),
+        "wbm_samples": len(wbm_ds) if wbm_ds is not None else 0,
         "args": vars(args),
     }
     (run_dir / "run_config.json").write_text(json.dumps(meta, indent=2, default=str))
@@ -263,6 +319,10 @@ def run_train(args: argparse.Namespace) -> None:
             "seconds": time.time() - t0,
             "force_step_frac": float(sum(1 for x in force_losses if x > 0.0) / max(len(force_losses), 1)),
         }
+        if wbm_loader is not None and args.wbm_every > 0 and (epoch + 1) % args.wbm_every == 0:
+            probe_path = run_dir / "wbm_probe" / f"epoch_{epoch + 1:03d}.csv"
+            wbm_stats = probe_wbm(model, wbm_loader, scaler, device, args.amp, probe_path, args.wbm_max_batches)
+            row["wbm_probe"] = wbm_stats
         history.append(row)
         (run_dir / "history.json").write_text(json.dumps(history, indent=2))
         target_model = model._orig_mod if hasattr(model, "_orig_mod") else model
@@ -291,4 +351,12 @@ def run_train(args: argparse.Namespace) -> None:
             f"force_frac={row['force_step_frac']:.3f} "
             f"sec={row['seconds']:.1f}"
         )
+        if "wbm_probe" in row:
+            w = row["wbm_probe"]
+            print(
+                f"wbm_probe epoch={epoch + 1} "
+                f"n={int(w['n'])} mean={w['mean']:.5f} std={w['std']:.5f} "
+                f"min={w['min']:.5f} max={w['max']:.5f} "
+                f"csv={run_dir / 'wbm_probe' / f'epoch_{epoch + 1:03d}.csv'}"
+            )
 

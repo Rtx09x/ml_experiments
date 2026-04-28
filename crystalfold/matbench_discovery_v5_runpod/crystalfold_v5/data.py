@@ -630,12 +630,15 @@ class FlatGraphDataset(Dataset):
         self.split = split
         with h5py.File(self.h5_path, "r") as hf:
             self.n_total = int(hf.attrs["n_samples"])
-            ids = [x.decode() if isinstance(x, bytes) else str(x) for x in hf["material_ids"][:]]
-        unique = np.array(sorted(set(ids)), dtype=object)
-        rng = np.random.default_rng(seed)
-        rng.shuffle(unique)
-        train_ids = set(unique[: int(len(unique) * train_frac)])
-        self.indices = [i for i, mid in enumerate(ids) if (mid in train_ids) == (split == "train")]
+            self.material_ids = [x.decode() if isinstance(x, bytes) else str(x) for x in hf["material_ids"][:]]
+        if split == "all":
+            self.indices = list(range(self.n_total))
+        else:
+            unique = np.array(sorted(set(self.material_ids)), dtype=object)
+            rng = np.random.default_rng(seed)
+            rng.shuffle(unique)
+            train_ids = set(unique[: int(len(unique) * train_frac)])
+            self.indices = [i for i, mid in enumerate(self.material_ids) if (mid in train_ids) == (split == "train")]
         self._hf: h5py.File | None = None
 
     def __len__(self) -> int:
@@ -654,6 +657,7 @@ class FlatGraphDataset(Dataset):
         src = hf["edges/src"][e0:e1].astype(np.int64)
         dst = hf["edges/dst"][e0:e1].astype(np.int64)
         return {
+            "material_id": self.material_ids[i],
             "atom_features": hf["atoms/atom_features"][a0:a1].astype(np.float32),
             "frac_coords": hf["atoms/frac_coords"][a0:a1].astype(np.float32),
             "forces": hf["atoms/forces"][a0:a1].astype(np.float32),
@@ -682,6 +686,7 @@ def collate_graphs(samples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         edge_graph_index.append(torch.full((ei.shape[1],), len(edge_graph_index), dtype=torch.long))
         atom_offset += int(s["n_atoms"])
     return {
+        "material_ids": [s["material_id"] for s in samples],
         "atom_features": torch.cat([torch.as_tensor(s["atom_features"], dtype=torch.float32) for s in samples], dim=0),
         "frac_coords": torch.cat([torch.as_tensor(s["frac_coords"], dtype=torch.float32) for s in samples], dim=0),
         "forces": torch.cat([torch.as_tensor(s["forces"], dtype=torch.float32) for s in samples], dim=0),
